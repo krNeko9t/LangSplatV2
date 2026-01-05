@@ -44,20 +44,39 @@ def find_images_dir(scene_dir):
     """查找图像目录"""
     scene_path = Path(scene_dir)
     
-    # 可能的图像目录
+    # 可能的图像目录（更全面的搜索）
     possible_dirs = [
         scene_path / "dslr" / "resized_undistorted_images",
         scene_path / "dslr" / "resized_images",
         scene_path / "dslr" / "images",
+        scene_path / "dslr" / "resized_anon_masks",  # 可能包含图像
         scene_path / "iphone" / "images",
+        scene_path / "images",  # 直接在根目录
     ]
     
+    # 递归搜索所有可能的图像目录
+    all_possible_dirs = []
+    for base_dir in [scene_path / "dslr", scene_path / "iphone", scene_path]:
+        if base_dir.exists():
+            # 查找所有包含图像的目录
+            for subdir in base_dir.rglob("*"):
+                if subdir.is_dir():
+                    images = list(subdir.glob("*.jpg")) + list(subdir.glob("*.png")) + \
+                             list(subdir.glob("*.JPG")) + list(subdir.glob("*.PNG"))
+                    if len(images) > 0:
+                        all_possible_dirs.append(subdir)
+    
+    # 优先使用已知的目录
     for img_dir in possible_dirs:
         if img_dir.exists():
-            # 检查是否有图像文件
-            images = list(img_dir.glob("*.jpg")) + list(img_dir.glob("*.png"))
+            images = list(img_dir.glob("*.jpg")) + list(img_dir.glob("*.png")) + \
+                     list(img_dir.glob("*.JPG")) + list(img_dir.glob("*.PNG"))
             if len(images) > 0:
                 return img_dir
+    
+    # 如果已知目录都不存在，使用找到的第一个包含图像的目录
+    if all_possible_dirs:
+        return all_possible_dirs[0]
     
     return None
 
@@ -66,7 +85,8 @@ def convert_scannetpp_example(
     input_dir: str,
     output_dir: str,
     scene_name: str = "scanet_example",
-    use_dslr: bool = True
+    use_dslr: bool = True,
+    images_dir: str = None
 ):
     """
     转换ScanNet++示例数据到LangSplatV2格式
@@ -87,20 +107,57 @@ def convert_scannetpp_example(
     
     # 1. 查找并复制图像
     print("\n[1/3] Processing images...")
-    if use_dslr:
-        source_dir = input_path / "dslr"
-        images_source = find_images_dir(input_path / "dslr")
+    
+    # 如果手动指定了图像目录，直接使用
+    if images_dir:
+        images_source = Path(images_dir)
+        if not images_source.exists():
+            print(f"ERROR: Specified images directory does not exist: {images_source}")
+            return False
     else:
-        source_dir = input_path / "iphone"
-        images_source = find_images_dir(input_path / "iphone")
+        # 自动查找
+        if use_dslr:
+            source_dir = input_path / "dslr"
+            images_source = find_images_dir(input_path / "dslr")
+        else:
+            source_dir = input_path / "iphone"
+            images_source = find_images_dir(input_path / "iphone")
     
     if images_source is None:
         print(f"ERROR: Could not find images directory!")
-        print("Searched in:")
+        print("\nSearched in:")
         print("  - dslr/resized_undistorted_images")
         print("  - dslr/resized_images")
         print("  - dslr/images")
         print("  - iphone/images")
+        print("\nTrying to find images in the directory structure...")
+        
+        # 列出所有可能的图像目录
+        scene_path = Path(input_dir)
+        found_dirs = []
+        for base_dir in [scene_path / "dslr", scene_path / "iphone", scene_path]:
+            if base_dir.exists():
+                for subdir in base_dir.rglob("*"):
+                    if subdir.is_dir():
+                        images = list(subdir.glob("*.jpg")) + list(subdir.glob("*.png")) + \
+                                 list(subdir.glob("*.JPG")) + list(subdir.glob("*.PNG"))
+                        if len(images) > 0:
+                            found_dirs.append((subdir, len(images)))
+        
+        if found_dirs:
+            print(f"\nFound {len(found_dirs)} directories with images:")
+            for img_dir, count in found_dirs[:10]:  # 只显示前10个
+                rel_path = img_dir.relative_to(scene_path)
+                print(f"  - {rel_path} ({count} images)")
+            if len(found_dirs) > 10:
+                print(f"  ... and {len(found_dirs) - 10} more")
+            print("\nPlease specify the correct images directory manually or check the directory structure.")
+        else:
+            print("\nNo directories with images found. Please check:")
+            print("  1. The input directory path is correct")
+            print("  2. Image files exist (jpg, png)")
+            print("  3. Image files are in a subdirectory")
+        
         return False
     
     print(f"Found images in: {images_source}")
@@ -234,6 +291,12 @@ if __name__ == "__main__":
         help="Input directory (scanet_example)"
     )
     parser.add_argument(
+        "--images_dir",
+        type=str,
+        default=None,
+        help="Manually specify images directory (optional)"
+    )
+    parser.add_argument(
         "--output_dir",
         type=str,
         default="./data/scannetpp",
@@ -257,7 +320,8 @@ if __name__ == "__main__":
         args.input_dir,
         args.output_dir,
         args.scene_name,
-        use_dslr=not args.use_iphone
+        use_dslr=not args.use_iphone,
+        images_dir=args.images_dir
     )
     
     exit(0 if success else 1)
