@@ -1,0 +1,25 @@
+# --- 核心依赖 (去掉了版本限制) ---
+open-clip-torch
+plyfile
+tqdm
+tensorboard
+jaxtyping
+matplotlib
+scikit-learn
+
+# --- 包名修正 ---
+# Conda 中的 opencv 通常对应 pip 中的 opencv-python
+opencv-python
+
+# --- 被移除的库 (说明) ---
+# 1. pytorch, torchvision, torchaudio, cudatoolkit -> 按你要求移除，请手动安装
+# 2. python, pip -> 这是环境基础，不需要写入 txt
+# 3. typing, pathlib -> ⚠️ 严正警告：如果你升级到 Python 3.8+，这两个是内置库。
+#    强制 pip install 它们会覆盖系统内置库，导致严重的 AttributeError 报错。
+#    所以我直接删除了它们。
+
+# --- 本地 CUDA 扩展 (需要手动编译安装) ---
+# 下面这两行通常不能直接在 txt 里无脑跑，建议手动执行 pip install
+# ./submodules/segment-anything-langsplat
+# ./submodules/efficient-langsplat-rasterization
+# ./submodules/simple-knn
