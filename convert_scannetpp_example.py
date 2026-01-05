@@ -243,7 +243,7 @@ def convert_scannetpp_example(
         shutil.rmtree(sparse_dst)
     
     # 复制COLMAP文件
-    print("正在复制COLMAP文件...")
+        print("正在复制COLMAP文件...")
     
     # 检查是二进制还是文本格式
     print(f"  检查源目录: {sparse_src}")
