@@ -245,17 +245,28 @@ def convert_scannetpp_example(
     # 复制COLMAP文件
     print("正在复制COLMAP文件...")
     
-        # 检查是二进制还是文本格式
-        if (sparse_src / "cameras.bin").exists():
-            # 二进制格式
-            required_files = ["cameras.bin", "images.bin", "points3D.bin"]
-            for f in required_files:
-                src_file = sparse_src / f
-                if src_file.exists():
-                    shutil.copy2(src_file, sparse_dst / f)
-                    print(f"  ✓ 已复制 {f}")
-                else:
-                    print(f"  ✗ 缺少 {f}")
+    # 检查是二进制还是文本格式
+    print(f"  检查源目录: {sparse_src}")
+    print(f"  源目录存在: {sparse_src.exists()}")
+    
+    if sparse_src.exists():
+        # 列出源目录中的文件
+        src_files = list(sparse_src.iterdir())
+        print(f"  源目录中的文件 ({len(src_files)} 个):")
+        for f in src_files[:10]:
+            print(f"    - {f.name} ({'文件' if f.is_file() else '目录'})")
+    
+    if (sparse_src / "cameras.bin").exists():
+        # 二进制格式
+        print("  发现二进制格式COLMAP文件")
+        required_files = ["cameras.bin", "images.bin", "points3D.bin"]
+        for f in required_files:
+            src_file = sparse_src / f
+            if src_file.exists():
+                shutil.copy2(src_file, sparse_dst / f)
+                print(f"  ✓ 已复制 {f}")
+            else:
+                print(f"  ✗ 缺少 {f}")
     elif (sparse_src / "cameras.txt").exists():
         # 文本格式，需要转换为二进制（或直接使用文本格式）
         print("  发现文本格式的COLMAP文件")
@@ -314,9 +325,16 @@ def convert_scannetpp_example(
             print("  ✓ 已复制文本格式文件")
             print("  注意: LangSplatV2可能需要二进制格式，您可以稍后手动转换:")
             print(f"    colmap model_converter --input_path {sparse_src} --output_path {sparse_dst} --output_type BIN")
-        else:
-            print(f"  ✗ 在 {sparse_src} 中未找到有效的COLMAP文件")
-            return False
+    else:
+        # 既没有二进制也没有文本格式
+        print(f"  ✗ 在 {sparse_src} 中未找到有效的COLMAP文件")
+        print(f"  请检查COLMAP重建是否完成")
+        print(f"  如果需要重新运行COLMAP重建，请使用以下命令:")
+        print(f"    cd {input_path / ('dslr' if use_dslr else 'iphone')}")
+        print(f"    colmap feature_extractor --database_path database.db --image_path resized_images")
+        print(f"    colmap exhaustive_matcher --database_path database.db")
+        print(f"    colmap mapper --database_path database.db --image_path resized_images --output_path colmap/sparse")
+        return False
     
     print(f"✓ COLMAP稀疏重建已复制到 {sparse_dst}")
     
@@ -410,6 +428,14 @@ def convert_scannetpp_example(
             print(f"\n  sparse/0/ 目录中的文件:")
             for f in sparse_files[:10]:
                 print(f"    - {f.name} ({'文件' if f.is_file() else '目录'})")
+        else:
+            print(f"\n  ⚠ sparse/0/ 目录存在但为空!")
+            print(f"  原始COLMAP目录: {sparse_src}")
+            print(f"  原始目录中的文件:")
+            if sparse_src and sparse_src.exists():
+                src_files = list(sparse_src.iterdir())
+                for f in src_files[:10]:
+                    print(f"    - {f.name} ({'文件' if f.is_file() else '目录'})")
     
     if all_ok:
         print("\n✓ 转换成功!")
