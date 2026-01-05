@@ -243,7 +243,7 @@ def convert_scannetpp_example(
         shutil.rmtree(sparse_dst)
     
     # 复制COLMAP文件
-    print("正在复制COLMAP文件...")
+        print("正在复制COLMAP文件...")
     
         # 检查是二进制还是文本格式
         if (sparse_src / "cameras.bin").exists():
@@ -256,64 +256,64 @@ def convert_scannetpp_example(
                     print(f"  ✓ 已复制 {f}")
                 else:
                     print(f"  ✗ 缺少 {f}")
-    elif (sparse_src / "cameras.txt").exists():
-        # 文本格式，需要转换为二进制（或直接使用文本格式）
-        print("  发现文本格式的COLMAP文件")
-        print("  注意: LangSplatV2更推荐二进制格式")
-        print("  尝试转换为二进制格式...")
-        
-        # 使用COLMAP转换工具
-        import subprocess
-        import shutil as shutil_module
-        
-        # 先检查colmap命令是否可用
-        colmap_available = False
-        try:
-            result = subprocess.run(
-                ["colmap", "--version"],
-                capture_output=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                colmap_available = True
-        except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError):
+        elif (sparse_src / "cameras.txt").exists():
+            # 文本格式，需要转换为二进制（或直接使用文本格式）
+            print("  发现文本格式的COLMAP文件")
+            print("  注意: LangSplatV2更推荐二进制格式")
+            print("  尝试转换为二进制格式...")
+            
+            # 使用COLMAP转换工具
+            import subprocess
+            import shutil as shutil_module
+            
+            # 先检查colmap命令是否可用
             colmap_available = False
-        
-        if colmap_available:
             try:
-                print("  使用COLMAP转换工具...")
-                result = subprocess.run([
-                    "colmap", "model_converter",
-                    "--input_path", str(sparse_src),
-                    "--output_path", str(sparse_dst),
-                    "--output_type", "BIN"
-                ], check=True, capture_output=True, text=True, timeout=30)
-                print("  ✓ 成功转换为二进制格式")
-            except subprocess.CalledProcessError as e:
-                print(f"  ⚠ COLMAP转换失败: {e}")
-                print("  错误输出:", e.stderr if hasattr(e, 'stderr') else 'N/A')
-                print("  将直接复制文本文件...")
+                result = subprocess.run(
+                    ["colmap", "--version"],
+                    capture_output=True,
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    colmap_available = True
+            except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError):
+                colmap_available = False
+        
+            if colmap_available:
+                try:
+                    print("  使用COLMAP转换工具...")
+                    result = subprocess.run([
+                        "colmap", "model_converter",
+                        "--input_path", str(sparse_src),
+                        "--output_path", str(sparse_dst),
+                        "--output_type", "BIN"
+                    ], check=True, capture_output=True, text=True, timeout=30)
+                    print("  ✓ 成功转换为二进制格式")
+                except subprocess.CalledProcessError as e:
+                    print(f"  ⚠ COLMAP转换失败: {e}")
+                    print("  错误输出:", e.stderr if hasattr(e, 'stderr') else 'N/A')
+                    print("  将直接复制文本文件...")
+                    if sparse_dst.exists():
+                        shutil_module.rmtree(sparse_dst)
+                    shutil_module.copytree(sparse_src, sparse_dst)
+                    print("  ✓ 已复制文本格式文件")
+                    print("  注意: 您可能需要手动转换为二进制格式:")
+                    print(f"    colmap model_converter --input_path {sparse_src} --output_path {sparse_dst} --output_type BIN")
+                except (FileNotFoundError, PermissionError) as e:
+                    print(f"  ⚠ 无法执行COLMAP命令: {e}")
+                    print("  将直接复制文本文件...")
+                    if sparse_dst.exists():
+                        shutil_module.rmtree(sparse_dst)
+                    shutil_module.copytree(sparse_src, sparse_dst)
+                    print("  ✓ 已复制文本格式文件")
+            else:
+                print("  ⚠ COLMAP命令不可用，直接复制文本文件")
                 if sparse_dst.exists():
                     shutil_module.rmtree(sparse_dst)
                 shutil_module.copytree(sparse_src, sparse_dst)
                 print("  ✓ 已复制文本格式文件")
-                print("  注意: 您可能需要手动转换为二进制格式:")
+                print("  注意: LangSplatV2可能需要二进制格式，您可以稍后手动转换:")
                 print(f"    colmap model_converter --input_path {sparse_src} --output_path {sparse_dst} --output_type BIN")
-            except (FileNotFoundError, PermissionError) as e:
-                print(f"  ⚠ 无法执行COLMAP命令: {e}")
-                print("  将直接复制文本文件...")
-                if sparse_dst.exists():
-                    shutil_module.rmtree(sparse_dst)
-                shutil_module.copytree(sparse_src, sparse_dst)
-                print("  ✓ 已复制文本格式文件")
-        else:
-            print("  ⚠ COLMAP命令不可用，直接复制文本文件")
-            if sparse_dst.exists():
-                shutil_module.rmtree(sparse_dst)
-            shutil_module.copytree(sparse_src, sparse_dst)
-            print("  ✓ 已复制文本格式文件")
-            print("  注意: LangSplatV2可能需要二进制格式，您可以稍后手动转换:")
-            print(f"    colmap model_converter --input_path {sparse_src} --output_path {sparse_dst} --output_type BIN")
         else:
             print(f"  ✗ 在 {sparse_src} 中未找到有效的COLMAP文件")
             return False
