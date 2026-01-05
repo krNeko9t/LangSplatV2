@@ -323,19 +323,93 @@ def convert_scannetpp_example(
     # 3. 验证结果
     print("\n[3/3] 验证输出...")
     
+    # 检查图像目录和文件
+    images_dst_abs = images_dst.resolve()
+    image_files = []
+    if images_dst_abs.exists():
+        image_files = (list(images_dst_abs.glob("*.jpg")) + list(images_dst_abs.glob("*.png")) +
+                       list(images_dst_abs.glob("*.JPG")) + list(images_dst_abs.glob("*.PNG")) +
+                       list(images_dst_abs.glob("*.jpeg")) + list(images_dst_abs.glob("*.JPEG")))
+    num_images = len(image_files)
+    images_ok = images_dst_abs.exists() and num_images > 0
+    
+    # 检查COLMAP文件（支持二进制和文本格式）
+    sparse_dst_abs = sparse_dst.resolve()
+    cameras_bin_path = sparse_dst_abs / "cameras.bin"
+    cameras_txt_path = sparse_dst_abs / "cameras.txt"
+    cameras_bin_ok = cameras_bin_path.exists()
+    cameras_txt_ok = cameras_txt_path.exists()
+    cameras_ok = cameras_bin_ok or cameras_txt_ok
+    
+    images_bin_path = sparse_dst_abs / "images.bin"
+    images_txt_path = sparse_dst_abs / "images.txt"
+    images_bin_ok = images_bin_path.exists()
+    images_txt_ok = images_txt_path.exists()
+    images_colmap_ok = images_bin_ok or images_txt_ok
+    
+    points3d_bin_path = sparse_dst_abs / "points3D.bin"
+    points3d_txt_path = sparse_dst_abs / "points3D.txt"
+    points3d_bin_ok = points3d_bin_path.exists()
+    points3d_txt_ok = points3d_txt_path.exists()
+    points3d_ok = points3d_bin_ok or points3d_txt_ok
+    
     # 检查必需文件
     required = {
-        "images": images_dst.exists() and len(list(images_dst.glob("*.jpg")) + list(images_dst.glob("*.png"))) > 0,
-        "cameras.bin": (sparse_dst / "cameras.bin").exists(),
-        "images.bin": (sparse_dst / "images.bin").exists(),
-        "points3D.bin": (sparse_dst / "points3D.bin").exists(),
+        "images": images_ok,
+        "cameras": cameras_ok,
+        "images_colmap": images_colmap_ok,
+        "points3D": points3d_ok,
     }
     
     all_ok = all(required.values())
     
-    for item, status in required.items():
-        status_str = "✓" if status else "✗"
-        print(f"  {status_str} {item}")
+    # 详细显示每个检查项
+    status_str = "✓" if images_ok else "✗"
+    print(f"  {status_str} images/ ({num_images} 张图像)")
+    if not images_ok:
+        print(f"    路径: {images_dst_abs}")
+        print(f"    存在: {images_dst_abs.exists()}")
+    
+    if cameras_ok:
+        if cameras_bin_ok:
+            print(f"  ✓ cameras.bin")
+        else:
+            print(f"  ✓ cameras.txt (文本格式，建议转换为二进制)")
+    else:
+        print(f"  ✗ cameras.bin 或 cameras.txt")
+        print(f"    检查路径: {cameras_bin_path}")
+        print(f"    cameras.bin存在: {cameras_bin_ok}")
+        print(f"    cameras.txt存在: {cameras_txt_ok}")
+    
+    if images_colmap_ok:
+        if images_bin_ok:
+            print(f"  ✓ images.bin")
+        else:
+            print(f"  ✓ images.txt (文本格式，建议转换为二进制)")
+    else:
+        print(f"  ✗ images.bin 或 images.txt")
+        print(f"    检查路径: {images_bin_path}")
+        print(f"    images.bin存在: {images_bin_ok}")
+        print(f"    images.txt存在: {images_txt_ok}")
+    
+    if points3d_ok:
+        if points3d_bin_ok:
+            print(f"  ✓ points3D.bin")
+        else:
+            print(f"  ✓ points3D.txt (文本格式，建议转换为二进制)")
+    else:
+        print(f"  ✗ points3D.bin 或 points3D.txt")
+        print(f"    检查路径: {points3d_bin_path}")
+        print(f"    points3D.bin存在: {points3d_bin_ok}")
+        print(f"    points3D.txt存在: {points3d_txt_ok}")
+    
+    # 列出sparse目录中的所有文件（用于调试）
+    if sparse_dst_abs.exists():
+        sparse_files = list(sparse_dst_abs.iterdir())
+        if sparse_files:
+            print(f"\n  sparse/0/ 目录中的文件:")
+            for f in sparse_files[:10]:
+                print(f"    - {f.name} ({'文件' if f.is_file() else '目录'})")
     
     if all_ok:
         print("\n✓ 转换成功!")
