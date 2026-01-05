@@ -101,18 +101,36 @@ def convert_scannetpp_example(
     output_path = Path(output_dir) / scene_name
     output_path.mkdir(parents=True, exist_ok=True)
     
-    print(f"Converting ScanNet++ example data...")
-    print(f"Input: {input_path}")
-    print(f"Output: {output_path}")
+    print(f"正在转换ScanNet++示例数据...")
+    print(f"输入目录: {input_path}")
+    print(f"输出目录: {output_path}")
     
     # 1. 查找并复制图像
-    print("\n[1/3] Processing images...")
+    print("\n[1/3] 处理图像...")
     
     # 如果手动指定了图像目录，直接使用
     if images_dir:
         images_source = Path(images_dir)
+        # 如果是相对路径，尝试相对于输入目录或当前工作目录解析
+        if not images_source.is_absolute() and not images_source.exists():
+            # 尝试相对于输入目录
+            try_path1 = input_path / images_source
+            # 尝试相对于当前工作目录
+            try_path2 = Path.cwd() / images_source
+            if try_path1.exists():
+                images_source = try_path1
+                print(f"使用相对于输入目录的路径: {images_source}")
+            elif try_path2.exists():
+                images_source = try_path2
+                print(f"使用相对于当前目录的路径: {images_source}")
+        
         if not images_source.exists():
-            print(f"ERROR: Specified images directory does not exist: {images_source}")
+            print(f"错误: 指定的图像目录不存在: {images_source}")
+            print(f"尝试的路径:")
+            print(f"  - {images_source}")
+            if not Path(images_dir).is_absolute():
+                print(f"  - {input_path / images_dir}")
+                print(f"  - {Path.cwd() / images_dir}")
             return False
     else:
         # 自动查找
@@ -124,13 +142,13 @@ def convert_scannetpp_example(
             images_source = find_images_dir(input_path / "iphone")
     
     if images_source is None:
-        print(f"ERROR: Could not find images directory!")
-        print("\nSearched in:")
+        print(f"错误: 无法找到图像目录!")
+        print("\n已搜索以下位置:")
         print("  - dslr/resized_undistorted_images")
         print("  - dslr/resized_images")
         print("  - dslr/images")
         print("  - iphone/images")
-        print("\nTrying to find images in the directory structure...")
+        print("\n正在尝试在整个目录结构中查找图像...")
         
         # 列出所有可能的图像目录
         scene_path = Path(input_dir)
@@ -139,47 +157,66 @@ def convert_scannetpp_example(
             if base_dir.exists():
                 for subdir in base_dir.rglob("*"):
                     if subdir.is_dir():
-                        images = list(subdir.glob("*.jpg")) + list(subdir.glob("*.png")) + \
-                                 list(subdir.glob("*.JPG")) + list(subdir.glob("*.PNG"))
+                        images = (list(subdir.glob("*.jpg")) + list(subdir.glob("*.png")) +
+                                 list(subdir.glob("*.JPG")) + list(subdir.glob("*.PNG")) +
+                                 list(subdir.glob("*.jpeg")) + list(subdir.glob("*.JPEG")))
                         if len(images) > 0:
                             found_dirs.append((subdir, len(images)))
         
         if found_dirs:
-            print(f"\nFound {len(found_dirs)} directories with images:")
+            print(f"\n找到 {len(found_dirs)} 个包含图像的目录:")
             for img_dir, count in found_dirs[:10]:  # 只显示前10个
                 rel_path = img_dir.relative_to(scene_path)
-                print(f"  - {rel_path} ({count} images)")
+                print(f"  - {rel_path} ({count} 张图像)")
             if len(found_dirs) > 10:
-                print(f"  ... and {len(found_dirs) - 10} more")
-            print("\nPlease specify the correct images directory manually or check the directory structure.")
+                print(f"  ... 还有 {len(found_dirs) - 10} 个目录")
+            print("\n请手动指定正确的图像目录，或检查目录结构")
+            print("使用 --images_dir 参数指定图像目录")
         else:
-            print("\nNo directories with images found. Please check:")
-            print("  1. The input directory path is correct")
-            print("  2. Image files exist (jpg, png)")
-            print("  3. Image files are in a subdirectory")
+            print("\n未找到包含图像的目录。请检查:")
+            print("  1. 输入目录路径是否正确")
+            print("  2. 图像文件是否存在 (jpg, png)")
+            print("  3. 图像文件是否在子目录中")
         
         return False
     
-    print(f"Found images in: {images_source}")
+    print(f"在以下目录找到图像: {images_source}")
     images_dst = output_path / "images"
     
     if images_dst.exists():
         shutil.rmtree(images_dst)
     images_dst.mkdir(parents=True, exist_ok=True)
     
-    # 复制图像
-    image_files = sorted(list(images_source.glob("*.jpg")) + list(images_source.glob("*.png")))
-    print(f"Copying {len(image_files)} images...")
+    # 复制图像 - 支持更多格式
+    image_extensions = ["*.jpg", "*.jpeg", "*.png", "*.JPG", "*.JPEG", "*.PNG"]
+    image_files = []
+    for ext in image_extensions:
+        image_files.extend(list(images_source.glob(ext)))
     
-    for img_file in tqdm(image_files, desc="Copying images"):
-        # 保持原始文件名或重命名为frame_XXXXXX格式
+    image_files = sorted(set(image_files))  # 去重并排序
+    print(f"找到 {len(image_files)} 张图像...")
+    
+    if len(image_files) == 0:
+        print(f"错误: 在 {images_source} 中未找到图像文件!")
+        print(f"请检查图像文件是否存在，支持的格式: jpg, jpeg, png")
+        # 列出目录内容帮助调试
+        all_files = list(images_source.iterdir())
+        if all_files:
+            print(f"\n目录中的文件/文件夹 (前10个):")
+            for item in all_files[:10]:
+                print(f"  - {item.name} ({'目录' if item.is_dir() else '文件'})")
+        return False
+    
+    print(f"正在复制 {len(image_files)} 张图像...")
+    for img_file in tqdm(image_files, desc="复制图像"):
+        # 保持原始文件名
         dst_file = images_dst / img_file.name
         shutil.copy2(img_file, dst_file)
     
-    print(f"✓ Images copied to {images_dst}")
+    print(f"✓ 图像已复制到 {images_dst}")
     
     # 2. 查找并复制COLMAP sparse重建结果
-    print("\n[2/3] Processing COLMAP sparse reconstruction...")
+    print("\n[2/3] 处理COLMAP稀疏重建结果...")
     
     if use_dslr:
         colmap_source_dir = input_path / "dslr" / "colmap"
@@ -189,15 +226,15 @@ def convert_scannetpp_example(
     sparse_src = find_colmap_sparse(colmap_source_dir)
     
     if sparse_src is None:
-        print(f"ERROR: Could not find COLMAP sparse reconstruction!")
-        print(f"Searched in: {colmap_source_dir}")
-        print("\nPlease ensure COLMAP reconstruction exists, or run:")
+        print(f"错误: 无法找到COLMAP稀疏重建结果!")
+        print(f"已搜索: {colmap_source_dir}")
+        print("\n请确保COLMAP重建结果存在，或运行以下命令:")
         print("  colmap feature_extractor --database_path database.db --image_path images")
         print("  colmap exhaustive_matcher --database_path database.db")
         print("  colmap mapper --database_path database.db --image_path images --output_path sparse")
         return False
     
-    print(f"Found COLMAP sparse in: {sparse_src}")
+    print(f"在以下位置找到COLMAP稀疏重建: {sparse_src}")
     
     sparse_dst = output_path / "sparse" / "0"
     sparse_dst.parent.mkdir(parents=True, exist_ok=True)
@@ -206,49 +243,85 @@ def convert_scannetpp_example(
         shutil.rmtree(sparse_dst)
     
     # 复制COLMAP文件
-    print("Copying COLMAP files...")
+    print("正在复制COLMAP文件...")
     
-    # 检查是二进制还是文本格式
-    if (sparse_src / "cameras.bin").exists():
-        # 二进制格式
-        required_files = ["cameras.bin", "images.bin", "points3D.bin"]
-        for f in required_files:
-            src_file = sparse_src / f
-            if src_file.exists():
-                shutil.copy2(src_file, sparse_dst / f)
-                print(f"  ✓ Copied {f}")
-            else:
-                print(f"  ✗ Missing {f}")
+        # 检查是二进制还是文本格式
+        if (sparse_src / "cameras.bin").exists():
+            # 二进制格式
+            required_files = ["cameras.bin", "images.bin", "points3D.bin"]
+            for f in required_files:
+                src_file = sparse_src / f
+                if src_file.exists():
+                    shutil.copy2(src_file, sparse_dst / f)
+                    print(f"  ✓ 已复制 {f}")
+                else:
+                    print(f"  ✗ 缺少 {f}")
     elif (sparse_src / "cameras.txt").exists():
         # 文本格式，需要转换为二进制（或直接使用文本格式）
-        print("  Found text format COLMAP files")
-        print("  Note: LangSplatV2 prefers binary format")
-        print("  Converting text to binary...")
+        print("  发现文本格式的COLMAP文件")
+        print("  注意: LangSplatV2更推荐二进制格式")
+        print("  尝试转换为二进制格式...")
         
         # 使用COLMAP转换工具
         import subprocess
+        import shutil as shutil_module
+        
+        # 先检查colmap命令是否可用
+        colmap_available = False
         try:
-            subprocess.run([
-                "colmap", "model_converter",
-                "--input_path", str(sparse_src),
-                "--output_path", str(sparse_dst),
-                "--output_type", "BIN"
-            ], check=True)
-            print("  ✓ Converted to binary format")
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            print("  ⚠ Could not convert to binary, copying text files")
-            print("  Note: You may need to convert manually using:")
-            print("    colmap model_converter --input_path <src> --output_path <dst> --output_type BIN")
-            # 直接复制文本文件
-            shutil.copytree(sparse_src, sparse_dst)
-    else:
-        print(f"  ✗ No valid COLMAP files found in {sparse_src}")
-        return False
+            result = subprocess.run(
+                ["colmap", "--version"],
+                capture_output=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                colmap_available = True
+        except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError):
+            colmap_available = False
+        
+        if colmap_available:
+            try:
+                print("  使用COLMAP转换工具...")
+                result = subprocess.run([
+                    "colmap", "model_converter",
+                    "--input_path", str(sparse_src),
+                    "--output_path", str(sparse_dst),
+                    "--output_type", "BIN"
+                ], check=True, capture_output=True, text=True, timeout=30)
+                print("  ✓ 成功转换为二进制格式")
+            except subprocess.CalledProcessError as e:
+                print(f"  ⚠ COLMAP转换失败: {e}")
+                print("  错误输出:", e.stderr if hasattr(e, 'stderr') else 'N/A')
+                print("  将直接复制文本文件...")
+                if sparse_dst.exists():
+                    shutil_module.rmtree(sparse_dst)
+                shutil_module.copytree(sparse_src, sparse_dst)
+                print("  ✓ 已复制文本格式文件")
+                print("  注意: 您可能需要手动转换为二进制格式:")
+                print(f"    colmap model_converter --input_path {sparse_src} --output_path {sparse_dst} --output_type BIN")
+            except (FileNotFoundError, PermissionError) as e:
+                print(f"  ⚠ 无法执行COLMAP命令: {e}")
+                print("  将直接复制文本文件...")
+                if sparse_dst.exists():
+                    shutil_module.rmtree(sparse_dst)
+                shutil_module.copytree(sparse_src, sparse_dst)
+                print("  ✓ 已复制文本格式文件")
+        else:
+            print("  ⚠ COLMAP命令不可用，直接复制文本文件")
+            if sparse_dst.exists():
+                shutil_module.rmtree(sparse_dst)
+            shutil_module.copytree(sparse_src, sparse_dst)
+            print("  ✓ 已复制文本格式文件")
+            print("  注意: LangSplatV2可能需要二进制格式，您可以稍后手动转换:")
+            print(f"    colmap model_converter --input_path {sparse_src} --output_path {sparse_dst} --output_type BIN")
+        else:
+            print(f"  ✗ 在 {sparse_src} 中未找到有效的COLMAP文件")
+            return False
     
-    print(f"✓ COLMAP sparse copied to {sparse_dst}")
+    print(f"✓ COLMAP稀疏重建已复制到 {sparse_dst}")
     
     # 3. 验证结果
-    print("\n[3/3] Verifying output...")
+    print("\n[3/3] 验证输出...")
     
     # 检查必需文件
     required = {
@@ -265,18 +338,18 @@ def convert_scannetpp_example(
         print(f"  {status_str} {item}")
     
     if all_ok:
-        print("\n✓ Conversion successful!")
-        print(f"\nOutput directory: {output_path}")
-        print("\nNext steps:")
-        print("1. Verify data:")
+        print("\n✓ 转换成功!")
+        print(f"\n输出目录: {output_path}")
+        print("\n下一步:")
+        print("1. 验证数据:")
         print(f"   python check_scannetpp_data.py --data_root {output_dir} --scene {scene_name}")
-        print("2. Preprocess (generate language features):")
+        print("2. 预处理（生成语言特征）:")
         print(f"   python preprocess.py --dataset_path {output_path}")
-        print("3. Train:")
+        print("3. 训练:")
         print(f"   bash train_scannetpp.sh {scene_name} 0")
         return True
     else:
-        print("\n✗ Conversion incomplete. Please check the errors above.")
+        print("\n✗ 转换未完成，请检查上面的错误信息")
         return False
 
 
