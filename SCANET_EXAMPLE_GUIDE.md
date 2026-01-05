@@ -25,7 +25,7 @@ scanet_example/
 
 ```bash
 python convert_scannetpp_example.py \
-    --input_dir /path/to/scanet_example \
+    --input_dir ../Dataset/scanet_example/ \
     --output_dir ./data/scannetpp \
     --scene_name scanet_example
 ```
