@@ -16,6 +16,24 @@ import torch
 import torchvision
 from torch import nn
 
+# 修复torchvision NMS CUDA后端问题：强制NMS在CPU上运行
+# 这是一个已知的torchvision 0.13.1与某些CUDA版本的兼容性问题
+import torchvision.ops as ops
+_original_nms = ops.nms
+def nms_cpu_fallback(boxes, scores, iou_threshold):
+    """NMS的CPU回退函数"""
+    boxes_cpu = boxes.cpu() if boxes.is_cuda else boxes
+    scores_cpu = scores.cpu() if scores.is_cuda else scores
+    keep = _original_nms(boxes_cpu, scores_cpu, iou_threshold)
+    return keep.to(boxes.device) if boxes.is_cuda else keep
+
+# 替换torchvision的NMS函数
+try:
+    ops.nms = nms_cpu_fallback
+    print("[INFO] 已启用NMS CPU回退模式，解决torchvision CUDA兼容性问题")
+except:
+    pass
+
 try:
     import open_clip
 except ImportError:
