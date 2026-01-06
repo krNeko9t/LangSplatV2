@@ -151,6 +151,90 @@ def read_points3D_text_with_tracks(path: str):
     return points3D_dict
 
 
+def read_intrinsics_text_flexible(path: str):
+    """
+    灵活读取COLMAP格式的cameras.txt文件，支持多种相机模型
+    如果模型不是PINHOLE，会尝试转换为PINHOLE格式
+    
+    Returns:
+        cameras: 相机字典，所有相机都转换为PINHOLE模型
+    """
+    cameras = {}
+    with open(path, "r") as fid:
+        for line in fid:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            elems = line.split()
+            if len(elems) < 4:
+                continue
+            
+            camera_id = int(elems[0])
+            model = elems[1]
+            width = int(elems[2])
+            height = int(elems[3])
+            params = np.array([float(x) for x in elems[4:]])
+            
+            # 转换不同模型为PINHOLE
+            if model == "PINHOLE":
+                # 已经是PINHOLE，直接使用: fx, fy, cx, cy
+                if len(params) != 4:
+                    raise ValueError(f"PINHOLE模型需要4个参数，但得到{len(params)}个")
+                cameras[camera_id] = Camera(
+                    id=camera_id, model="PINHOLE",
+                    width=width, height=height, params=params
+                )
+            elif model == "SIMPLE_PINHOLE":
+                # SIMPLE_PINHOLE: f, cx, cy -> PINHOLE: fx=fy=f, cx, cy
+                if len(params) != 3:
+                    raise ValueError(f"SIMPLE_PINHOLE模型需要3个参数，但得到{len(params)}个")
+                f, cx, cy = params
+                cameras[camera_id] = Camera(
+                    id=camera_id, model="PINHOLE",
+                    width=width, height=height,
+                    params=np.array([f, f, cx, cy])
+                )
+                print(f"  相机 {camera_id}: SIMPLE_PINHOLE -> PINHOLE (f={f:.2f})")
+            elif model == "SIMPLE_RADIAL":
+                # SIMPLE_RADIAL: f, cx, cy, k -> PINHOLE: fx=fy=f, cx, cy (忽略畸变)
+                if len(params) != 4:
+                    raise ValueError(f"SIMPLE_RADIAL模型需要4个参数，但得到{len(params)}个")
+                f, cx, cy, k = params
+                cameras[camera_id] = Camera(
+                    id=camera_id, model="PINHOLE",
+                    width=width, height=height,
+                    params=np.array([f, f, cx, cy])
+                )
+                print(f"  相机 {camera_id}: SIMPLE_RADIAL -> PINHOLE (f={f:.2f}, 忽略畸变k={k:.4f})")
+            elif model == "RADIAL":
+                # RADIAL: f, cx, cy, k1, k2 -> PINHOLE: fx=fy=f, cx, cy (忽略畸变)
+                if len(params) != 5:
+                    raise ValueError(f"RADIAL模型需要5个参数，但得到{len(params)}个")
+                f, cx, cy, k1, k2 = params
+                cameras[camera_id] = Camera(
+                    id=camera_id, model="PINHOLE",
+                    width=width, height=height,
+                    params=np.array([f, f, cx, cy])
+                )
+                print(f"  相机 {camera_id}: RADIAL -> PINHOLE (f={f:.2f}, 忽略畸变k1={k1:.4f}, k2={k2:.4f})")
+            else:
+                # 其他模型，尝试提取焦距和主点
+                print(f"  警告: 相机 {camera_id} 使用模型 {model}，尝试提取基本参数")
+                if len(params) >= 3:
+                    # 假设前3个参数是 f, cx, cy
+                    f, cx, cy = params[0], params[1], params[2]
+                    cameras[camera_id] = Camera(
+                        id=camera_id, model="PINHOLE",
+                        width=width, height=height,
+                        params=np.array([f, f, cx, cy])
+                    )
+                    print(f"  相机 {camera_id}: {model} -> PINHOLE (使用前3个参数)")
+                else:
+                    raise ValueError(f"不支持的相机模型: {model}，参数数量: {len(params)}")
+    
+    return cameras
+
+
 def read_colmap_text_to_binary(scannetpp_path: str, scene_name: str, output_path: str):
     """
     读取ScanNet++提供的COLMAP文本格式文件，转换为二进制格式
@@ -166,7 +250,7 @@ def read_colmap_text_to_binary(scannetpp_path: str, scene_name: str, output_path
         points3D: 点云字典
     """
     from scene.colmap_loader import (
-        read_intrinsics_text, read_extrinsics_text
+        read_extrinsics_text
     )
     
     colmap_path = os.path.join(scannetpp_path, scene_name, "dslr", "colmap")
@@ -184,10 +268,10 @@ def read_colmap_text_to_binary(scannetpp_path: str, scene_name: str, output_path
     images = {}
     points3D_dict = {}
     
-    # 读取cameras.txt
+    # 读取cameras.txt（使用灵活版本）
     if os.path.exists(cameras_txt):
-        cameras = read_intrinsics_text(cameras_txt)
-        print(f"  ✓ 读取到 {len(cameras)} 个相机")
+        cameras = read_intrinsics_text_flexible(cameras_txt)
+        print(f"  ✓ 读取到 {len(cameras)} 个相机（已转换为PINHOLE模型）")
     else:
         raise FileNotFoundError(f"未找到cameras.txt: {cameras_txt}")
     
