@@ -11,6 +11,7 @@ ScanNet++数据集转换脚本
 """
 
 import os
+import sklearn
 import sys
 import shutil
 import argparse
