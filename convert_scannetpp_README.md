@@ -92,6 +92,15 @@ COLMAP标准格式，每行包含一个相机的内参：
 1 PINHOLE 3840 2160 3000.0 3000.0 1920.0 1080.0
 ```
 
+**支持的相机模型**:
+- `PINHOLE`: 直接使用 (fx, fy, cx, cy)
+- `SIMPLE_PINHOLE`: 自动转换为PINHOLE (f, cx, cy → fx=fy=f, cx, cy)
+- `SIMPLE_RADIAL`: 自动转换为PINHOLE (忽略畸变参数)
+- `RADIAL`: 自动转换为PINHOLE (忽略畸变参数)
+- 其他模型会尝试提取基本参数
+
+脚本会自动将所有相机模型转换为PINHOLE格式，以满足LangSplatV2的要求。
+
 #### images.txt 格式
 
 COLMAP标准格式，每两行表示一个图像：
@@ -185,17 +194,17 @@ POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)
 
 ## 常见问题
 
-### 1. 相机参数文件格式不匹配
+### 1. 相机模型不支持
 
-**问题**: 如果ScanNet++的相机参数文件格式与脚本期望的不同
+**问题**: ScanNet++使用的相机模型不是PINHOLE（如SIMPLE_PINHOLE、SIMPLE_RADIAL等）
 
-**解决方案**: 修改`load_scannetpp_cameras()`函数以匹配实际格式
+**解决方案**: 脚本已经自动处理，会将以下模型转换为PINHOLE：
+- `SIMPLE_PINHOLE` → `PINHOLE` (f, cx, cy → fx=fy=f, cx, cy)
+- `SIMPLE_RADIAL` → `PINHOLE` (忽略畸变参数)
+- `RADIAL` → `PINHOLE` (忽略畸变参数)
+- 其他模型会尝试提取基本参数
 
-```python
-def load_scannetpp_cameras(intrinsics_path: str, extrinsics_path: str):
-    # 根据实际格式修改此函数
-    ...
-```
+如果遇到不支持的模型，脚本会显示警告信息，你可以查看`cameras.txt`文件确认模型类型。
 
 ### 2. 找不到相机参数文件
 
