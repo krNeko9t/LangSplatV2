@@ -110,3 +110,4 @@ Desktop.ini
 
 lerf_ovs/
 data/
+*.pth
