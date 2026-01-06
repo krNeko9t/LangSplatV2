@@ -5,6 +5,7 @@ import argparse
 import numpy as np
 import torch
 from tqdm import tqdm
+from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
 import cv2
 
 from dataclasses import dataclass, field
@@ -14,55 +15,6 @@ from copy import deepcopy
 import torch
 import torchvision
 from torch import nn
-
-# 修复torchvision NMS CUDA后端问题：强制NMS在CPU上运行
-# 这是一个已知的torchvision 0.13.1与某些CUDA版本的兼容性问题
-# 必须在导入segment_anything之前进行修复
-
-# 方法1: 替换torchvision.ops.nms
-import torchvision.ops as ops
-_original_nms = ops.nms
-
-def nms_cpu_fallback(boxes, scores, iou_threshold):
-    """NMS的CPU回退函数 - 强制在CPU上运行NMS"""
-    # 将CUDA张量移到CPU
-    if boxes.is_cuda:
-        boxes_cpu = boxes.cpu()
-        scores_cpu = scores.cpu()
-        keep = _original_nms(boxes_cpu, scores_cpu, iou_threshold)
-        return keep.to(boxes.device)
-    else:
-        return _original_nms(boxes, scores, iou_threshold)
-
-ops.nms = nms_cpu_fallback
-
-# 方法2: 尝试替换torchvision的C扩展（如果存在）
-try:
-    import torchvision._C as _C
-    if hasattr(_C, 'nms'):
-        _original_c_nms = _C.nms
-        def c_nms_cpu_fallback(boxes, scores, iou_threshold):
-            if boxes.is_cuda:
-                boxes_cpu = boxes.cpu()
-                scores_cpu = scores.cpu()
-                keep = _original_c_nms(boxes_cpu, scores_cpu, iou_threshold)
-                return keep.to(boxes.device)
-            else:
-                return _original_c_nms(boxes, scores, iou_threshold)
-        _C.nms = c_nms_cpu_fallback
-except Exception as e:
-    pass
-
-# 方法3: 使用monkey patch拦截torchvision的所有NMS调用
-# 这需要在导入SAM之前完成
-import torchvision
-if hasattr(torchvision, 'ops'):
-    torchvision.ops.nms = nms_cpu_fallback
-
-print("[INFO] 已启用NMS CPU回退模式，解决torchvision CUDA兼容性问题")
-
-# 在修复NMS之后导入SAM
-from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
 
 try:
     import open_clip
@@ -344,24 +296,7 @@ def masks_update(*args, **kwargs):
 def sam_encoder(image):
     image = cv2.cvtColor(image[0].permute(1,2,0).numpy().astype(np.uint8), cv2.COLOR_BGR2RGB)
     # pre-compute masks
-    # 使用try-except来处理NMS CUDA错误，如果失败则临时将模型移到CPU
-    try:
-        masks_default, masks_s, masks_m, masks_l = mask_generator.generate(image)
-    except (NotImplementedError, RuntimeError) as e:
-        if "nms" in str(e).lower() or "CUDA" in str(e):
-            print(f"[WARNING] NMS CUDA错误，临时切换到CPU模式: {e}")
-            # 保存原始设备
-            original_device = next(mask_generator.predictor.model.parameters()).device
-            # 临时移到CPU
-            mask_generator.predictor.model.to('cpu')
-            try:
-                masks_default, masks_s, masks_m, masks_l = mask_generator.generate(image)
-            finally:
-                # 恢复原始设备
-                mask_generator.predictor.model.to(original_device)
-        else:
-            raise
-    
+    masks_default, masks_s, masks_m, masks_l = mask_generator.generate(image)
     # pre-compute postprocess
     masks_default, masks_s, masks_m, masks_l = \
         masks_update(masks_default, masks_s, masks_m, masks_l, iou_thr=0.8, score_thr=0.7, inner_thr=0.5)
