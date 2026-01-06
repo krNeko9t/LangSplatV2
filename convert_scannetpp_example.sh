@@ -1,11 +1,11 @@
 #!/bin/bash
 # ScanNet++转换脚本使用示例
 
-# 设置路径（请根据实际情况修改）
-SCANNETPP_PATH="/path/to/scannetpp"          # ScanNet++数据集根路径
-SCENE_NAME="scene_0000_00"                  # 场景名称
-OUTPUT_PATH="/path/to/output"               # 输出路径
-GS_SCENE_PATH="/path/to/3dgs/scene"         # 3DGS场景路径
+# 设置路径（请根据实际情况修改
+SCANNETPP_PATH="/home/bingxing2/ailab/liuyifei/lyj/Dataset/scannetpp"          # ScanNet++数据集根路径
+SCENE_NAME="0a7cc12c0e"                  # 场景名称
+OUTPUT_PATH="./scannetpp"               # 输出路径
+GS_SCENE_PATH="/home/bingxing2/ailab/liuyifei/lyj/Dataset/scannetpp/0a7cc12c0e/3dgs"         # 3DGS场景路径
 
 # 运行转换脚本
 python convert_scannetpp.py \
