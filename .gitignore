@@ -107,3 +107,6 @@ Desktop.ini
 
 # Caches
 .cache/
+
+lerf_ovs/
+data/
