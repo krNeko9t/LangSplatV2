@@ -60,6 +60,14 @@ class ModelParams(ParamGroup):
 
     def extract(self, args):
         g = super().extract(args)
+        # 如果参数值为 None（sentinel=True 时未传递的参数），使用类中定义的默认值
+        for key in vars(self):
+            if key.startswith("_"):
+                arg_key = key[1:]  # 去掉下划线
+            else:
+                arg_key = key
+            if hasattr(g, arg_key) and getattr(g, arg_key) is None:
+                setattr(g, arg_key, getattr(self, key))
         g.source_path = os.path.abspath(g.source_path)
         g.lf_path = os.path.join(g.source_path, self._language_features_name)
         return g
