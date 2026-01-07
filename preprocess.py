@@ -313,7 +313,10 @@ def mask_nms(masks, scores, iou_thr=0.7, score_thr=0.1, inner_thr=0.2, **kwargs)
         selected_idx (torch.Tensor): A tensor representing the selected indices of the masks after NMS.
     """
     num_masks = masks.shape[0]
-    profiler.start(f"mask_nms_计算IoU矩阵_{num_masks}个masks")
+    # 检查设备并打印警告
+    if masks.device.type == 'cpu':
+        print(f"[警告] mask_nms在CPU上运行！masks device: {masks.device}, 这会导致性能严重下降！")
+    profiler.start(f"mask_nms_计算IoU矩阵_{num_masks}个masks_[{masks.device}]")
 
     scores, idx = scores.sort(0, descending=True)
     
@@ -375,6 +378,11 @@ def masks_update(*args, **kwargs):
         iou_pred = torch.from_numpy(np.stack([m['predicted_iou'] for m in masks_lvl], axis=0))
         stability = torch.from_numpy(np.stack([m['stability_score'] for m in masks_lvl], axis=0))
         profiler.end()
+        
+        # 检查设备
+        if seg_pred.device.type == 'cpu':
+            print(f"[警告] masks_update level_{idx}: seg_pred在CPU上！shape: {seg_pred.shape}, device: {seg_pred.device}")
+            print(f"[警告] 这会导致mask_nms在CPU上运行，性能严重下降！")
 
         scores = stability * iou_pred
         keep_mask_nms = mask_nms(seg_pred, scores, **kwargs)
@@ -392,9 +400,16 @@ def sam_encoder(image):
     profiler.end()
     
     # pre-compute masks
+    # 检查SAM模型设备
+    sam_device = next(mask_generator.predictor.model.parameters()).device
+    print(f"[DEBUG] SAM模型设备: {sam_device}")
+    print(f"[DEBUG] 输入图像类型: {type(image)}, shape: {image.shape if hasattr(image, 'shape') else 'N/A'}")
+    
     profiler.start("SAM_mask_generation")
     masks_default, masks_s, masks_m, masks_l = mask_generator.generate(image)
     profiler.end()
+    
+    print(f"[DEBUG] 生成的mask数量 - default: {len(masks_default)}, s: {len(masks_s)}, m: {len(masks_m)}, l: {len(masks_l)}")
     
     # pre-compute postprocess
     profiler.start("masks_update_NMS处理")
