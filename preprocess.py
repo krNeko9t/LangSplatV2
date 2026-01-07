@@ -1,6 +1,8 @@
 import os
 import random
 import argparse
+import time
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -20,6 +22,71 @@ try:
     import open_clip
 except ImportError:
     assert False, "open_clip is not installed, install it with `pip install open-clip-torch`"
+
+
+class Profiler:
+    """性能分析器，用于测量各阶段耗时"""
+    def __init__(self):
+        self.timings = defaultdict(list)
+        self.current_stage = None
+        self.start_time = None
+        self.use_cuda = torch.cuda.is_available()
+        
+    def start(self, stage_name):
+        """开始计时一个阶段"""
+        if self.current_stage is not None:
+            self.end()
+        self.current_stage = stage_name
+        if self.use_cuda:
+            torch.cuda.synchronize()
+        self.start_time = time.time()
+        
+    def end(self):
+        """结束当前阶段的计时"""
+        if self.current_stage is None:
+            return
+        if self.use_cuda:
+            torch.cuda.synchronize()
+        elapsed = time.time() - self.start_time
+        self.timings[self.current_stage].append(elapsed)
+        self.current_stage = None
+        
+    def print_summary(self):
+        """打印性能分析摘要"""
+        print("\n" + "="*80)
+        print("性能分析摘要 (Performance Profile Summary)")
+        print("="*80)
+        
+        total_time = sum(sum(times) for times in self.timings.values())
+        
+        # 按总时间排序
+        sorted_stages = sorted(
+            self.timings.items(), 
+            key=lambda x: sum(x[1]), 
+            reverse=True
+        )
+        
+        print(f"\n总处理时间: {total_time:.2f}秒")
+        print(f"\n各阶段耗时统计:")
+        print("-" * 80)
+        print(f"{'阶段名称':<40} {'总时间(秒)':<15} {'平均时间(秒)':<15} {'调用次数':<10} {'占比':<10}")
+        print("-" * 80)
+        
+        for stage_name, times in sorted_stages:
+            total = sum(times)
+            avg = total / len(times)
+            count = len(times)
+            percentage = (total / total_time * 100) if total_time > 0 else 0
+            print(f"{stage_name:<40} {total:<15.2f} {avg:<15.4f} {count:<10} {percentage:<10.1f}%")
+        
+        print("="*80 + "\n")
+        
+    def get_timings(self):
+        """返回所有计时数据"""
+        return dict(self.timings)
+
+# 全局profiler实例
+profiler = Profiler()
 
 
 @dataclass
@@ -118,12 +185,17 @@ def create(image_list, data_list, save_folder):
     timer = 0
     img_embeds = torch.zeros((len(image_list), 300, embed_size))
     seg_maps = torch.zeros((len(image_list), 4, *image_list[0].shape[1:])) 
+    
+    profiler.start("模型移动到GPU")
     mask_generator.predictor.model.to('cuda')
+    profiler.end()
 
     for i, img in tqdm(enumerate(image_list), desc="Embedding images", leave=False):
         timer += 1
         try:
+            profiler.start(f"处理图像_{i+1}_总时间")
             img_embed, seg_map = _embed_clip_sam_tiles(img.unsqueeze(0), sam_encoder)
+            profiler.end()
         except:
             raise ValueError(timer)
 
@@ -156,8 +228,11 @@ def create(image_list, data_list, save_folder):
         seg_map = torch.stack(seg_map_tensor, dim=0)
         seg_maps[i] = seg_map
 
+    profiler.start("模型移动到CPU")
     mask_generator.predictor.model.to('cpu')
-        
+    profiler.end()
+    
+    profiler.start("保存文件")
     for i in range(img_embeds.shape[0]):
         save_path = os.path.join(save_folder, data_list[i].split('.')[0])
         assert total_lengths[i] == int(seg_maps[i].max() + 1)
@@ -166,6 +241,10 @@ def create(image_list, data_list, save_folder):
             'seg_maps': seg_maps[i]
         }
         sava_numpy(save_path, curr)
+    profiler.end()
+    
+    # 打印性能分析摘要
+    profiler.print_summary()
 
 def sava_numpy(save_path, data):
     save_path_s = save_path + '_s.npy'
@@ -175,16 +254,23 @@ def sava_numpy(save_path, data):
 
 def _embed_clip_sam_tiles(image, sam_encoder):
     aug_imgs = torch.cat([image])
+    
+    profiler.start("SAM编码总时间")
     seg_images, seg_map = sam_encoder(aug_imgs)
+    profiler.end()
 
     clip_embeds = {}
     for mode in ['default', 's', 'm', 'l']:
+        if mode not in seg_images:
+            continue
+        profiler.start(f"CLIP编码_{mode}")
         tiles = seg_images[mode]
         tiles = tiles.to("cuda")
         with torch.no_grad():
             clip_embed = model.encode_image(tiles)
         clip_embed /= clip_embed.norm(dim=-1, keepdim=True)
         clip_embeds[mode] = clip_embed.detach().cpu().half()
+        profiler.end()
     
     return clip_embeds, seg_map
 
@@ -226,9 +312,10 @@ def mask_nms(masks, scores, iou_thr=0.7, score_thr=0.1, inner_thr=0.2, **kwargs)
     Returns:
         selected_idx (torch.Tensor): A tensor representing the selected indices of the masks after NMS.
     """
+    num_masks = masks.shape[0]
+    profiler.start(f"mask_nms_计算IoU矩阵_{num_masks}个masks")
 
     scores, idx = scores.sort(0, descending=True)
-    num_masks = idx.shape[0]
     
     masks_ord = masks[idx.view(-1), :]
     masks_area = torch.sum(masks_ord, dim=(1, 2), dtype=torch.float)
@@ -248,6 +335,7 @@ def mask_nms(masks, scores, iou_thr=0.7, score_thr=0.1, inner_thr=0.2, **kwargs)
             if intersection / masks_area[i] >= 0.85 and intersection / masks_area[j] < 0.5:
                 inner_iou = 1 - (intersection / masks_area[j]) * (intersection / masks_area[i])
                 inner_iou_matrix[j, i] = inner_iou
+    profiler.end()
 
     iou_matrix.triu_(diagonal=1)
     iou_max, _ = iou_matrix.max(dim=0)
@@ -281,27 +369,40 @@ def mask_nms(masks, scores, iou_thr=0.7, score_thr=0.1, inner_thr=0.2, **kwargs)
 def masks_update(*args, **kwargs):
     # remove redundant masks based on the scores and overlap rate between masks
     masks_new = ()
-    for masks_lvl in (args):
+    for idx, masks_lvl in enumerate(args):
+        profiler.start(f"masks_update_准备数据_level_{idx}")
         seg_pred =  torch.from_numpy(np.stack([m['segmentation'] for m in masks_lvl], axis=0))
         iou_pred = torch.from_numpy(np.stack([m['predicted_iou'] for m in masks_lvl], axis=0))
         stability = torch.from_numpy(np.stack([m['stability_score'] for m in masks_lvl], axis=0))
+        profiler.end()
 
         scores = stability * iou_pred
         keep_mask_nms = mask_nms(seg_pred, scores, **kwargs)
+        
+        profiler.start(f"masks_update_filter_level_{idx}")
         masks_lvl = filter(keep_mask_nms, masks_lvl)
+        profiler.end()
 
         masks_new += (masks_lvl,)
     return masks_new
 
 def sam_encoder(image):
+    profiler.start("图像格式转换")
     image = cv2.cvtColor(image[0].permute(1,2,0).numpy().astype(np.uint8), cv2.COLOR_BGR2RGB)
+    profiler.end()
+    
     # pre-compute masks
+    profiler.start("SAM_mask_generation")
     masks_default, masks_s, masks_m, masks_l = mask_generator.generate(image)
+    profiler.end()
+    
     # pre-compute postprocess
+    profiler.start("masks_update_NMS处理")
     masks_default, masks_s, masks_m, masks_l = \
         masks_update(masks_default, masks_s, masks_m, masks_l, iou_thr=0.8, score_thr=0.7, inner_thr=0.5)
+    profiler.end()
     
-    def mask2segmap(masks, image):
+    def mask2segmap(masks, image, mode_name=""):
         seg_img_list = []
         seg_map = -np.ones(image.shape[:2], dtype=np.int32)
         for i in range(len(masks)):
@@ -313,17 +414,24 @@ def sam_encoder(image):
             seg_map[masks[i]['segmentation']] = i
         seg_imgs = np.stack(seg_img_list, axis=0) # b,H,W,3
         seg_imgs = (torch.from_numpy(seg_imgs.astype("float32")).permute(0,3,1,2) / 255.0).to('cuda')
-
         return seg_imgs, seg_map
 
     seg_images, seg_maps = {}, {}
-    seg_images['default'], seg_maps['default'] = mask2segmap(masks_default, image)
+    profiler.start("mask2segmap_default")
+    seg_images['default'], seg_maps['default'] = mask2segmap(masks_default, image, "default")
+    profiler.end()
     if len(masks_s) != 0:
-        seg_images['s'], seg_maps['s'] = mask2segmap(masks_s, image)
+        profiler.start("mask2segmap_s")
+        seg_images['s'], seg_maps['s'] = mask2segmap(masks_s, image, "s")
+        profiler.end()
     if len(masks_m) != 0:
-        seg_images['m'], seg_maps['m'] = mask2segmap(masks_m, image)
+        profiler.start("mask2segmap_m")
+        seg_images['m'], seg_maps['m'] = mask2segmap(masks_m, image, "m")
+        profiler.end()
     if len(masks_l) != 0:
-        seg_images['l'], seg_maps['l'] = mask2segmap(masks_l, image)
+        profiler.start("mask2segmap_l")
+        seg_images['l'], seg_maps['l'] = mask2segmap(masks_l, image, "l")
+        profiler.end()
     
     # 0:default 1:s 2:m 3:l
     return seg_images, seg_maps
