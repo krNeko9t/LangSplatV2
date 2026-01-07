@@ -15,6 +15,7 @@
         --quick_render \
         --topk 4
 """
+import sklearn
 import numpy as np
 import torch
 import os
@@ -287,7 +288,7 @@ if __name__ == "__main__":
     print(f"  Checkpoint: {args.checkpoint}")
     
     # 确定查询列表
-    if args.queries:
+    if getattr(args, 'queries', None):
         query_texts = args.queries
     elif args.query:
         query_texts = [args.query]
@@ -297,7 +298,7 @@ if __name__ == "__main__":
         print(f"未指定查询，使用默认查询: {query_texts}")
     
     # 确定视图列表
-    view_indices = args.view_indices if args.view_indices is not None else [args.view_idx]
+    view_indices = args.view_indices if getattr(args, 'view_indices', None) is not None else [args.view_idx]
     
     print(f"  查询列表: {query_texts}")
     print(f"  视图索引: {view_indices}")

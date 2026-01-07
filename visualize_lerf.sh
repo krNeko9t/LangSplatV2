@@ -3,15 +3,15 @@
 # 用法: bash visualize_lerf.sh <dataset_name> <index> <checkpoint> [query] [view_idx]
 # 示例: bash visualize_lerf.sh teatime 0 10000 "teapot" 0
 
-DATASET_NAME=$1
-INDEX=$2
-CHECKPOINT=$3
-QUERY=${4:-"teapot"}  # 默认查询为 "teapot"
+DATASET_NAME=$1 # teatime: 数据集名称
+INDEX=$2 # 0: 模型索引
+CHECKPOINT=$3 # 10000: checkpoint迭代次数
+QUERY=${4:-"elephant"}  # 默认查询为 "teapot"
 VIEW_IDX=${5:-0}      # 默认视图索引为 0
 TOPK=4
 
 # 数据集路径（根据实际情况修改）
-DATASET_ROOT_PATH=../../data/lerf_ovs
+DATASET_ROOT_PATH=./lerf_ovs
 
 ROOT_PATH="."
 
