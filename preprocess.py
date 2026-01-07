@@ -313,9 +313,6 @@ def mask_nms(masks, scores, iou_thr=0.7, score_thr=0.1, inner_thr=0.2, **kwargs)
         selected_idx (torch.Tensor): A tensor representing the selected indices of the masks after NMS.
     """
     num_masks = masks.shape[0]
-    # 检查设备并打印警告
-    if masks.device.type == 'cpu':
-        print(f"[警告] mask_nms在CPU上运行！masks device: {masks.device}, 这会导致性能严重下降！")
     profiler.start(f"mask_nms_计算IoU矩阵_{num_masks}个masks_[{masks.device}]")
 
     scores, idx = scores.sort(0, descending=True)
@@ -379,10 +376,10 @@ def masks_update(*args, **kwargs):
         stability = torch.from_numpy(np.stack([m['stability_score'] for m in masks_lvl], axis=0))
         profiler.end()
         
-        # 检查设备
-        if seg_pred.device.type == 'cpu':
-            print(f"[警告] masks_update level_{idx}: seg_pred在CPU上！shape: {seg_pred.shape}, device: {seg_pred.device}")
-            print(f"[警告] 这会导致mask_nms在CPU上运行，性能严重下降！")
+        # 关键修复：将tensor移到GPU上，否则mask_nms会在CPU上运行，性能严重下降
+        seg_pred = seg_pred.to('cuda')
+        iou_pred = iou_pred.to('cuda')
+        stability = stability.to('cuda')
 
         scores = stability * iou_pred
         keep_mask_nms = mask_nms(seg_pred, scores, **kwargs)
@@ -396,20 +393,38 @@ def masks_update(*args, **kwargs):
 
 def sam_encoder(image):
     profiler.start("图像格式转换")
-    image = cv2.cvtColor(image[0].permute(1,2,0).numpy().astype(np.uint8), cv2.COLOR_BGR2RGB)
+    # 检查输入图像格式和设备
+    if isinstance(image, torch.Tensor):
+        input_device = image.device
+        input_shape = image.shape
+        # 如果已经是GPU tensor，尝试直接使用，避免CPU转换
+        if input_device.type == 'cuda':
+            # 直接从GPU tensor转换，避免CPU roundtrip
+            image_np = image[0].permute(1,2,0).cpu().numpy().astype(np.uint8)
+            image = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
+        else:
+            image = cv2.cvtColor(image[0].permute(1,2,0).numpy().astype(np.uint8), cv2.COLOR_BGR2RGB)
+    else:
+        image = cv2.cvtColor(image[0].permute(1,2,0).numpy().astype(np.uint8), cv2.COLOR_BGR2RGB)
     profiler.end()
     
     # pre-compute masks
-    # 检查SAM模型设备
+    # 确保SAM模型在GPU上
     sam_device = next(mask_generator.predictor.model.parameters()).device
-    print(f"[DEBUG] SAM模型设备: {sam_device}")
-    print(f"[DEBUG] 输入图像类型: {type(image)}, shape: {image.shape if hasattr(image, 'shape') else 'N/A'}")
+    if sam_device.type != 'cuda':
+        print(f"[警告] SAM模型不在GPU上！device: {sam_device}")
     
     profiler.start("SAM_mask_generation")
+    # SAM的generate方法内部会处理图像，但输入是numpy数组
+    # 这会导致CPU→GPU传输开销
     masks_default, masks_s, masks_m, masks_l = mask_generator.generate(image)
     profiler.end()
     
-    print(f"[DEBUG] 生成的mask数量 - default: {len(masks_default)}, s: {len(masks_s)}, m: {len(masks_m)}, l: {len(masks_l)}")
+    # 统计生成的mask数量
+    total_masks = len(masks_default) + len(masks_s) + len(masks_m) + len(masks_l)
+    if total_masks > 400:
+        print(f"[性能提示] 生成了大量mask ({total_masks}个: default={len(masks_default)}, s={len(masks_s)}, m={len(masks_m)}, l={len(masks_l)})")
+        print(f"[性能提示] 建议：降低 --sam_points_per_side (当前: {mask_generator.points_per_side}) 或提高 --sam_pred_iou_thresh")
     
     # pre-compute postprocess
     profiler.start("masks_update_NMS处理")
@@ -472,6 +487,15 @@ if __name__ == '__main__':
     parser.add_argument('--dataset_path', type=str, required=True)
     parser.add_argument('--resolution', type=int, default=-1)
     parser.add_argument('--sam_ckpt_path', type=str, default="ckpts/sam_vit_h_4b8939.pth")
+    # SAM性能优化参数
+    parser.add_argument('--sam_points_per_side', type=int, default=32, 
+                        help='SAM采样点密度，降低可提升速度但减少mask数量 (默认: 32)')
+    parser.add_argument('--sam_pred_iou_thresh', type=float, default=0.7,
+                        help='SAM预测IoU阈值，提高可减少mask数量 (默认: 0.7)')
+    parser.add_argument('--sam_stability_score_thresh', type=float, default=0.85,
+                        help='SAM稳定性分数阈值，提高可减少mask数量 (默认: 0.85)')
+    parser.add_argument('--sam_crop_n_layers', type=int, default=1,
+                        help='SAM多尺度裁剪层数，设为0可禁用多尺度 (默认: 1)')
     args = parser.parse_args()
     torch.set_default_dtype(torch.float32)
 
@@ -483,13 +507,20 @@ if __name__ == '__main__':
 
     model = OpenCLIPNetwork(OpenCLIPNetworkConfig)
     sam = sam_model_registry["vit_h"](checkpoint=sam_ckpt_path).to('cuda')
+    
+    # 使用命令行参数配置SAM，允许性能优化
+    print(f"[SAM配置] points_per_side={args.sam_points_per_side}, "
+          f"pred_iou_thresh={args.sam_pred_iou_thresh}, "
+          f"stability_score_thresh={args.sam_stability_score_thresh}, "
+          f"crop_n_layers={args.sam_crop_n_layers}")
+    
     mask_generator = SamAutomaticMaskGenerator(
         model=sam,
-        points_per_side=32,
-        pred_iou_thresh=0.7,
+        points_per_side=args.sam_points_per_side,
+        pred_iou_thresh=args.sam_pred_iou_thresh,
         box_nms_thresh=0.7,
-        stability_score_thresh=0.85,
-        crop_n_layers=1,
+        stability_score_thresh=args.sam_stability_score_thresh,
+        crop_n_layers=args.sam_crop_n_layers,
         crop_n_points_downscale_factor=1,
         min_mask_region_area=100,
     )
