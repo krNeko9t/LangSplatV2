@@ -436,14 +436,14 @@ def load_scannetpp_cameras(intrinsics_path: str, extrinsics_path: str) -> Tuple[
 def step1_copy_dslr_images(scannetpp_path: str, output_path: str, scene_name: str):
     """
     Step 1: 复制DSLR图像到images文件夹
-    从 dslr/resized_images/ 复制图像
+    从 dslr/resized_undistorted_images/ 复制图像
     """
     print(f"\n{'='*60}")
     print(f"Step 1: 复制DSLR图像")
     print(f"{'='*60}")
     
-    # ScanNet++的图像在 dslr/resized_images/ 目录
-    dslr_images_path = os.path.join(scannetpp_path, scene_name, "dslr", "resized_images")
+    # ScanNet++的图像在 dslr/resized_undistorted_images/ 目录
+    dslr_images_path = os.path.join(scannetpp_path, scene_name, "dslr", "resized_undistorted_images")
     output_images_path = os.path.join(output_path, scene_name, "images")
     
     if not os.path.exists(dslr_images_path):

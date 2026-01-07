@@ -192,12 +192,8 @@ def create(image_list, data_list, save_folder):
 
     for i, img in tqdm(enumerate(image_list), desc="Embedding images", leave=False):
         timer += 1
-        try:
-            profiler.start(f"处理图像_{i+1}_总时间")
-            img_embed, seg_map = _embed_clip_sam_tiles(img.unsqueeze(0), sam_encoder)
-            profiler.end()
-        except:
-            raise ValueError(timer)
+
+        img_embed, seg_map = _embed_clip_sam_tiles(img.unsqueeze(0), sam_encoder)
 
         lengths = [len(v) for k, v in img_embed.items()]
         total_length = sum(lengths)
@@ -227,6 +223,7 @@ def create(image_list, data_list, save_folder):
             seg_map_tensor.append(torch.from_numpy(v))
         seg_map = torch.stack(seg_map_tensor, dim=0)
         seg_maps[i] = seg_map
+        # profiler.print_summary()
 
     profiler.start("模型移动到CPU")
     mask_generator.predictor.model.to('cpu')
@@ -313,7 +310,7 @@ def mask_nms(masks, scores, iou_thr=0.7, score_thr=0.1, inner_thr=0.2, **kwargs)
         selected_idx (torch.Tensor): A tensor representing the selected indices of the masks after NMS.
     """
     num_masks = masks.shape[0]
-    profiler.start(f"mask_nms_计算IoU矩阵_{num_masks}个masks_[{masks.device}]")
+    profiler.start(f"mask_nms_计算IoU矩阵")
 
     scores, idx = scores.sort(0, descending=True)
     
@@ -417,14 +414,18 @@ def sam_encoder(image):
     profiler.start("SAM_mask_generation")
     # SAM的generate方法内部会处理图像，但输入是numpy数组
     # 这会导致CPU→GPU传输开销
-    masks_default, masks_s, masks_m, masks_l = mask_generator.generate(image)
+    # print('autocast')
+    # with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+    # masks = mask_generator.generate(image)
+    with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False):
+        masks_default, masks_s, masks_m, masks_l = mask_generator.generate(image)
     profiler.end()
     
     # 统计生成的mask数量
     total_masks = len(masks_default) + len(masks_s) + len(masks_m) + len(masks_l)
     if total_masks > 400:
         print(f"[性能提示] 生成了大量mask ({total_masks}个: default={len(masks_default)}, s={len(masks_s)}, m={len(masks_m)}, l={len(masks_l)})")
-        print(f"[性能提示] 建议：降低 --sam_points_per_side (当前: {mask_generator.points_per_side}) 或提高 --sam_pred_iou_thresh")
+        print(f"[性能提示] 建议：降低 --sam_points_per_side (当前: {args.sam_points_per_side}) 或提高 --sam_pred_iou_thresh")
     
     # pre-compute postprocess
     profiler.start("masks_update_NMS处理")
@@ -488,13 +489,13 @@ if __name__ == '__main__':
     parser.add_argument('--resolution', type=int, default=-1)
     parser.add_argument('--sam_ckpt_path', type=str, default="ckpts/sam_vit_h_4b8939.pth")
     # SAM性能优化参数
-    parser.add_argument('--sam_points_per_side', type=int, default=32, 
+    parser.add_argument('--sam_points_per_side', type=int, default=16, 
                         help='SAM采样点密度，降低可提升速度但减少mask数量 (默认: 32)')
     parser.add_argument('--sam_pred_iou_thresh', type=float, default=0.7,
                         help='SAM预测IoU阈值，提高可减少mask数量 (默认: 0.7)')
     parser.add_argument('--sam_stability_score_thresh', type=float, default=0.85,
                         help='SAM稳定性分数阈值，提高可减少mask数量 (默认: 0.85)')
-    parser.add_argument('--sam_crop_n_layers', type=int, default=1,
+    parser.add_argument('--sam_crop_n_layers', type=int, default=0,
                         help='SAM多尺度裁剪层数，设为0可禁用多尺度 (默认: 1)')
     args = parser.parse_args()
     torch.set_default_dtype(torch.float32)
@@ -508,6 +509,9 @@ if __name__ == '__main__':
     model = OpenCLIPNetwork(OpenCLIPNetworkConfig)
     sam = sam_model_registry["vit_h"](checkpoint=sam_ckpt_path).to('cuda')
     
+    # print('sam to bfloat16')
+    # sam.to(dtype=torch.bfloat16)
+    
     # 使用命令行参数配置SAM，允许性能优化
     print(f"[SAM配置] points_per_side={args.sam_points_per_side}, "
           f"pred_iou_thresh={args.sam_pred_iou_thresh}, "
@@ -517,6 +521,7 @@ if __name__ == '__main__':
     mask_generator = SamAutomaticMaskGenerator(
         model=sam,
         points_per_side=args.sam_points_per_side,
+        points_per_batch = 64,
         pred_iou_thresh=args.sam_pred_iou_thresh,
         box_nms_thresh=0.7,
         stability_score_thresh=args.sam_stability_score_thresh,
