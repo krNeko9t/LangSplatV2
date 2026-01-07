@@ -39,9 +39,19 @@ class ParamGroup:
 
     def extract(self, args):
         group = GroupParams()
+        # 先提取 args 中匹配的属性
         for arg in vars(args).items():
             if arg[0] in vars(self) or ("_" + arg[0]) in vars(self):
                 setattr(group, arg[0], arg[1])
+        # 然后确保所有 self 中定义的属性都被提取（如果不存在或为 None，使用默认值）
+        for key in vars(self):
+            if key.startswith("_"):
+                arg_key = key[1:]  # 去掉下划线
+            else:
+                arg_key = key
+            # 如果属性不存在或值为 None，使用类中定义的默认值
+            if not hasattr(group, arg_key) or getattr(group, arg_key) is None:
+                setattr(group, arg_key, getattr(self, key))
         return group
 
 class ModelParams(ParamGroup): 
@@ -60,16 +70,10 @@ class ModelParams(ParamGroup):
 
     def extract(self, args):
         g = super().extract(args)
-        # 如果参数值为 None（sentinel=True 时未传递的参数），使用类中定义的默认值
-        for key in vars(self):
-            if key.startswith("_"):
-                arg_key = key[1:]  # 去掉下划线
-            else:
-                arg_key = key
-            if hasattr(g, arg_key) and getattr(g, arg_key) is None:
-                setattr(g, arg_key, getattr(self, key))
-        g.source_path = os.path.abspath(g.source_path)
-        g.lf_path = os.path.join(g.source_path, self._language_features_name)
+        # 处理 source_path 和 lf_path
+        if hasattr(g, 'source_path') and g.source_path:
+            g.source_path = os.path.abspath(g.source_path)
+            g.lf_path = os.path.join(g.source_path, self._language_features_name)
         return g
 
 class PipelineParams(ParamGroup):
@@ -110,13 +114,14 @@ def get_combined_args(parser : ArgumentParser):
     args_cmdline = parser.parse_args(cmdlne_string)
 
     try:
-        cfgfilepath = os.path.join(args_cmdline.model_path, "cfg_args")
-        print("Looking for config file in", cfgfilepath)
-        with open(cfgfilepath) as cfg_file:
-            print("Config file found: {}".format(cfgfilepath))
-            cfgfile_string = cfg_file.read()
-    except TypeError:
-        print("Config file not found at")
+        if args_cmdline.model_path:
+            cfgfilepath = os.path.join(args_cmdline.model_path, "cfg_args")
+            print("Looking for config file in", cfgfilepath)
+            with open(cfgfilepath) as cfg_file:
+                print("Config file found: {}".format(cfgfilepath))
+                cfgfile_string = cfg_file.read()
+    except (TypeError, AttributeError, FileNotFoundError):
+        print("Config file not found")
         pass
     args_cfgfile = eval(cfgfile_string)
 
