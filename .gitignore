@@ -112,3 +112,4 @@ lerf_ovs/
 data/
 *.pth
 scannetpp/
+visualize_result*/
