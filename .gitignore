@@ -113,3 +113,5 @@ data/
 *.pth
 scannetpp/
 visualize_result*/
+output*/
+vis_*/

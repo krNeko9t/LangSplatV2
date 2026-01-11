@@ -33,21 +33,38 @@ except ImportError:
 import matplotlib.pyplot as plt
 
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, args):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, start_ply, debug_from, args):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
-    gaussians.training_setup(opt)
+    
+    # 如果使用start_ply，先不调用training_setup，等加载PLY后再调用
+    if not start_ply:
+        gaussians.training_setup(opt)
 
     if opt.include_feature:
-        if not checkpoint:
-            raise ValueError("checkpoint missing!!!!!")
+        if not checkpoint and not start_ply:
+            raise ValueError("checkpoint or start_ply missing!!!!!")
+    
+    # 优先使用 checkpoint，如果没有则使用 start_ply
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         if len(model_params) == 12 and opt.include_feature:
             first_iter = 0
         gaussians.restore(model_params, opt)
+    elif start_ply:
+        # 从 PLY 文件加载基础 3DGS 参数
+        print(f"Loading from PLY file: {start_ply}")
+        gaussians.load_ply(start_ply)
+        # 设置 spatial_lr_scale（从 scene 获取 cameras_extent）
+        gaussians.spatial_lr_scale = scene.cameras_extent
+        # 初始化 max_radii2D（训练语言特征时不需要，但为了完整性设置）
+        if gaussians.max_radii2D.shape[0] != gaussians.get_xyz.shape[0]:
+            gaussians.max_radii2D = torch.zeros((gaussians.get_xyz.shape[0]), device="cuda")
+        # 加载PLY后，重新调用training_setup以确保语言特征参数形状正确
+        gaussians.training_setup(opt)
+        first_iter = 0
     
     # Initialize language feature codebooks
     if opt.include_feature and first_iter == 0:
@@ -256,6 +273,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[2000, 4000, 6000, 8000, 10_000, 30_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument("--start_ply", type=str, default = None)
     parser.add_argument('--cos_loss', action='store_true', default=False)
     parser.add_argument('--l1_loss', action='store_true', default=False)
     parser.add_argument('--normalize', action='store_true', default=False)
@@ -273,6 +291,6 @@ if __name__ == "__main__":
     # Start GUI server, configure and run training
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.start_ply, args.debug_from, args)
     # All done
     print("\nTraining complete.")
