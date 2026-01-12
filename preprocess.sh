@@ -1,1 +1,1 @@
-python preprocess.py --dataset_path ../../data/lerf_ovs/teatime
+python preprocess.py --dataset_path /mnt/shared-storage-gpfs2/solution-gpfs02/liuyifei/scannet_fuse/027cd6ea0f

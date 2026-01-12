@@ -7,7 +7,8 @@ from pathlib import Path
 # 1. 定义数据的公共根目录 (Root)
 # 它可以是绝对路径，也可以是相对于当前脚本的路径 (比如 "..")
 # 举例：如果你所有的比如 lerf_ovs, scannetpp 都在上一级目录
-DATA_ROOT = Path("/home/bingxing2/ailab/liuyifei/lyj/Dataset/scannetpp/scannetpp/") 
+# DATA_ROOT = Path("/home/bingxing2/ailab/liuyifei/lyj/Dataset/scannetpp/scannetpp/") 
+DATA_ROOT = Path("/mnt/shared-storage-gpfs2/solution-gpfs02/liuyifei/scannet_fuse")
 
 # 2. 定义场景列表 (Scenes)
 # 这里只需要填相对于 DATA_ROOT 的路径
@@ -54,11 +55,13 @@ def run_preprocess():
         # 对应 args: ["--dataset_path", full_path]
         cmd = [
             sys.executable, "preprocess.py",
-            "--dataset_path", str(full_dataset_path)
+            "--dataset_path", str(full_dataset_path),
+            # "-r", "2"
         ]
 
         try:
             # check=True 表示如果脚本报错(非0退出)，这里会抛出异常
+            print(cmd)
             subprocess.run(cmd, check=True)
             print(f"\n[成功] {sub_path} 处理完毕。")
         except subprocess.CalledProcessError:
