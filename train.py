@@ -32,28 +32,30 @@ except ImportError:
 
 import matplotlib.pyplot as plt
 
+# 每个元素的绝对值表示使用的轴（1=x,2=y,3=z），符号表示是否翻转
+START_PLY_TRANSFORM = [2, 1, -3]
+START_PLY_TRANSFORM = [2,1,-3]
+
+def apply_start_ply_transform(gaussians):
+    transform = START_PLY_TRANSFORM
+    if not transform :
+        return
+    coords = gaussians._xyz
+    perm = [abs(idx) - 1 for idx in transform]
+    signs = torch.tensor([1.0 if idx > 0 else -1.0 for idx in transform], device=coords.device)
+    with torch.no_grad():
+        transformed = coords[:, perm] * signs
+        gaussians._xyz.data.copy_(transformed)
+
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, start_ply, debug_from, args):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
-    
-    # 如果使用start_ply，先不调用training_setup，等加载PLY后再调用
-    if not start_ply:
-        gaussians.training_setup(opt)
+    start_from_ply = False
 
-    if opt.include_feature:
-        if not checkpoint and not start_ply:
-            raise ValueError("checkpoint or start_ply missing!!!!!")
-    
-    # 优先使用 checkpoint，如果没有则使用 start_ply
-    if checkpoint:
-        (model_params, first_iter) = torch.load(checkpoint)
-        if len(model_params) == 12 and opt.include_feature:
-            first_iter = 0
-        gaussians.restore(model_params, opt)
-    elif start_ply:
+    if start_ply and not checkpoint:
         # 从 PLY 文件加载基础 3DGS 参数
         print(f"Loading from PLY file: {start_ply}")
         gaussians.load_ply(start_ply)
@@ -62,8 +64,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # 初始化 max_radii2D（训练语言特征时不需要，但为了完整性设置）
         if gaussians.max_radii2D.shape[0] != gaussians.get_xyz.shape[0]:
             gaussians.max_radii2D = torch.zeros((gaussians.get_xyz.shape[0]), device="cuda")
-        # 加载PLY后，重新调用training_setup以确保语言特征参数形状正确
+        apply_start_ply_transform(gaussians)
         gaussians.training_setup(opt)
+        start_from_ply = True
+    else:
+        gaussians.training_setup(opt)
+
+    if opt.include_feature:
+        if not checkpoint and not start_from_ply:
+            raise ValueError("checkpoint or start_ply missing!!!!!")
+
+    if checkpoint:
+        (model_params, first_iter) = torch.load(checkpoint)
+        if len(model_params) == 12 and opt.include_feature:
+            first_iter = 0
+        gaussians.restore(model_params, opt)
+    elif start_from_ply:
         first_iter = 0
     
     # Initialize language feature codebooks
@@ -269,9 +285,9 @@ if __name__ == "__main__":
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[2000, 4000, 6000, 8000, 10_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[2000, 4000, 6000, 8000, 10_000, 30_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[100, 6000, 10_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[2000, 4000, 6000, 8000, 10_000, 30_000])
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[100, 6000, 10_000, 30_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument("--start_ply", type=str, default = None)
     parser.add_argument('--cos_loss', action='store_true', default=False)
