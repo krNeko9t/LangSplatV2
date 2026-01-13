@@ -28,6 +28,7 @@ import os
 import random
 from pathlib import Path
 from argparse import ArgumentParser
+from typing import Optional
 
 import numpy as np
 import torch
@@ -43,6 +44,34 @@ from gaussian_renderer import GaussianModel
 from eval.openclip_encoder import OpenCLIPNetwork
 from utils.general_utils import safe_state
 from utils.vq_utils import get_weights_and_indices
+from utils.sh_utils import RGB2SH
+
+
+def _slice_gaussians_cpu(gaussians: GaussianModel, sel: Optional[np.ndarray]):
+    """
+    在CPU上对Gaussian字段做子集切片，返回一个“轻量对象”，仅用于写PLY。
+    这样避免各种cuda/nn.Parameter副作用，也避免依赖 Scene / dataset。
+    """
+    class _G:
+        pass
+
+    g = _G()
+    g.max_sh_degree = gaussians.max_sh_degree
+    g.construct_list_of_attributes = gaussians.construct_list_of_attributes
+
+    def _maybe_slice(t: torch.Tensor):
+        t_cpu = t.detach().cpu()
+        if sel is None:
+            return t_cpu
+        return t_cpu[sel]
+
+    g._xyz = _maybe_slice(gaussians._xyz)
+    g._features_dc = _maybe_slice(gaussians._features_dc)
+    g._features_rest = _maybe_slice(gaussians._features_rest)
+    g._opacity = _maybe_slice(gaussians._opacity)
+    g._scaling = _maybe_slice(gaussians._scaling)
+    g._rotation = _maybe_slice(gaussians._rotation)
+    return g
 
 
 def seed_everything(seed: int):
@@ -57,7 +86,7 @@ def seed_everything(seed: int):
         torch.backends.cudnn.benchmark = True
 
 
-def _write_xyz_rgb_ply(xyz: np.ndarray, rgb_u8: np.ndarray, out_path: Path):
+def _write_xyz_rgb_ply(xyz: np.ndarray, rgb_u8: np.ndarray, out_path: Path, *, text: bool = False):
     assert xyz.ndim == 2 and xyz.shape[1] == 3
     assert rgb_u8.ndim == 2 and rgb_u8.shape[1] == 3
     assert xyz.shape[0] == rgb_u8.shape[0]
@@ -74,7 +103,52 @@ def _write_xyz_rgb_ply(xyz: np.ndarray, rgb_u8: np.ndarray, out_path: Path):
     verts["blue"] = rgb_u8[:, 2].astype(np.uint8)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    PlyData([PlyElement.describe(verts, "vertex")], text=True).write(str(out_path))
+    PlyData([PlyElement.describe(verts, "vertex")], text=text).write(str(out_path))
+
+
+def _write_gaussian_rgb_ply(
+    gaussians: GaussianModel,
+    rgb_float01: np.ndarray,
+    out_path: Path,
+    *,
+    text: bool = False,
+):
+    """
+    写“3DGS / Supersplat”兼容的 PLY：包含 x/y/z, nx/ny/nz, f_dc_*, f_rest_*, opacity, scale_*, rot_*。
+    我们把可视化颜色写进 f_dc_0..2（SH DC），并把 f_rest 清零，保证颜色不随视角变化。
+    """
+    if rgb_float01.ndim != 2 or rgb_float01.shape[1] != 3:
+        raise ValueError(f"rgb_float01 must be [P,3], got {rgb_float01.shape}")
+
+    xyz = gaussians._xyz.detach().cpu().numpy().astype(np.float32)
+    P = xyz.shape[0]
+    if rgb_float01.shape[0] != P:
+        raise ValueError(f"rgb_float01 P mismatch: {rgb_float01.shape[0]} vs {P}")
+
+    normals = np.zeros_like(xyz, dtype=np.float32)
+
+    # f_dc: store SH DC coefficients corresponding to desired RGB
+    rgb_t = torch.from_numpy(rgb_float01.astype(np.float32))
+    f_dc = RGB2SH(rgb_t).numpy().astype(np.float32)  # [P,3]
+
+    # f_rest: zeros
+    # gaussian_model.save_ply flattens _features_rest to [P, N]
+    rest_dim = int(gaussians._features_rest.shape[1] * gaussians._features_rest.shape[2])
+    f_rest = np.zeros((P, rest_dim), dtype=np.float32)
+
+    opacities = gaussians._opacity.detach().cpu().numpy().astype(np.float32)  # [P,1]
+    scale = gaussians._scaling.detach().cpu().numpy().astype(np.float32)      # [P,3] (log-scales in this repo)
+    rotation = gaussians._rotation.detach().cpu().numpy().astype(np.float32)  # [P,4]
+
+    # dtype schema must match attribute order used by gaussian_model.save_ply
+    dtype_full = [(attribute, "f4") for attribute in gaussians.construct_list_of_attributes()]
+    elements = np.empty(P, dtype=dtype_full)
+
+    attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+    elements[:] = list(map(tuple, attributes))
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    PlyData([PlyElement.describe(elements, "vertex")], text=text).write(str(out_path))
 
 
 def build_combined_gaussians_from_3levels(args) -> GaussianModel:
@@ -140,29 +214,42 @@ def export_query_relevance_ply(
     out_path: Path,
     max_points: int,
     device: torch.device,
+    ply_format: str,
 ):
     clip_model = OpenCLIPNetwork(device)
     clip_model.set_positives([query])
     text_feat = clip_model.pos_embeds[0].to(per_gs_feat.dtype).to(per_gs_feat.device)  # [512], normalized
     scores = per_gs_feat @ text_feat  # [P], in [-1, 1]
 
-    xyz = combined.get_xyz.detach()
+    sel_t = None
     if max_points and scores.numel() > max_points:
-        sel = torch.topk(scores, k=max_points, largest=True).indices
-        scores = scores[sel]
-        xyz = xyz[sel]
+        sel_t = torch.topk(scores, k=max_points, largest=True).indices
+        scores = scores[sel_t]
 
     s_min = float(scores.min().item())
     s_max = float(scores.max().item())
     scores01 = (scores - s_min) / (s_max - s_min + 1e-10)
     colors = (plt.cm.turbo(scores01.detach().cpu().numpy())[..., :3] * 255.0).astype(np.uint8)
+    colors01 = (colors.astype(np.float32) / 255.0)
 
-    _write_xyz_rgb_ply(
-        xyz.detach().cpu().numpy().astype(np.float32),
-        colors,
-        out_path,
-    )
-    return {"score_min": s_min, "score_max": s_max, "num_points": int(xyz.shape[0])}
+    if ply_format == "pointcloud":
+        xyz = combined.get_xyz.detach()
+        if sel_t is not None:
+            xyz = xyz[sel_t]
+        _write_xyz_rgb_ply(
+            xyz.detach().cpu().numpy().astype(np.float32),
+            colors,
+            out_path,
+            text=False,
+        )
+    elif ply_format == "gaussian":
+        sel_np = sel_t.detach().cpu().numpy() if sel_t is not None else None
+        g = _slice_gaussians_cpu(combined, sel_np)
+        _write_gaussian_rgb_ply(g, colors01, out_path, text=False)
+    else:
+        raise ValueError(f"Unknown ply_format={ply_format}")
+    num_points = int(scores.shape[0])
+    return {"score_min": s_min, "score_max": s_max, "num_points": num_points}
 
 
 def export_pca_embedding_ply(
@@ -172,6 +259,7 @@ def export_pca_embedding_ply(
     max_points: int,
     pca_fit_points: int,
     seed: int,
+    ply_format: str,
 ):
     """
     PCA(512->3) 后做RGB可视化。注意：PCA只在CPU上做（sklearn）。
@@ -197,13 +285,22 @@ def export_pca_embedding_ply(
     emb_max = emb3.max(axis=0, keepdims=True)
     emb01 = (emb3 - emb_min) / (emb_max - emb_min + 1e-10)
     rgb = np.clip(emb01 * 255.0, 0, 255).astype(np.uint8)
+    rgb01 = (rgb.astype(np.float32) / 255.0)
 
+    sel = None
     if max_points and P > max_points:
         sel = rng.choice(P, size=int(max_points), replace=False)
         xyz = xyz[sel]
         rgb = rgb[sel]
+        rgb01 = rgb01[sel]
 
-    _write_xyz_rgb_ply(xyz, rgb, out_path)
+    if ply_format == "pointcloud":
+        _write_xyz_rgb_ply(xyz, rgb, out_path, text=False)
+    elif ply_format == "gaussian":
+        g = _slice_gaussians_cpu(combined, sel)
+        _write_gaussian_rgb_ply(g, rgb01, out_path, text=False)
+    else:
+        raise ValueError(f"Unknown ply_format={ply_format}")
     return {
         "explained_variance_ratio": pca.explained_variance_ratio_.tolist(),
         "num_points": int(xyz.shape[0]),
@@ -227,12 +324,24 @@ def main():
     parser.add_argument("--export_query_ply", action="store_true", help="导出按query相似度上色的PLY（turbo）")
     parser.add_argument("--query", type=str, default=None, help="文本查询（用于query ply）")
     parser.add_argument("--export_pca_ply", action="store_true", help="导出PCA(512->3) embedding 的RGB PLY")
+    parser.add_argument(
+        "--ply_format",
+        type=str,
+        default="gaussian",
+        choices=["gaussian", "pointcloud"],
+        help="导出PLY格式：gaussian=3DGS/Supersplat兼容（含f_dc/scale/rot/opacity等），pointcloud=仅xyz+rgb",
+    )
 
     parser.add_argument("--max_points", type=int, default=50000, help="导出PLY最多点数（query为topN，pca为随机采样）")
     parser.add_argument("--pca_fit_points", type=int, default=200000, help="PCA拟合时的采样点数（过大可能慢）")
     parser.add_argument("--seed", type=int, default=42)
 
     args = get_combined_args(parser)
+    # 重要：get_combined_args 会把“默认值为None”的字段从Namespace里丢掉（只合并 v!=None 的项），
+    # 但 ModelParams.extract 会把缺失/None 的字段用默认值补齐。
+    model_params = model.extract(args)
+    # 后续逻辑里我们只需要 sh_degree；为了兼容既有写法，这里回填到 args 上。
+    args.sh_degree = model_params.sh_degree
     safe_state(False)
 
     if not args.export_query_ply and not args.export_pca_ply:
@@ -268,6 +377,7 @@ def main():
             out_path=out_path,
             max_points=args.max_points,
             device=device,
+            ply_format=args.ply_format,
         )
         print(f"[query ply] {out_path}  points={info['num_points']} score∈[{info['score_min']:.4f},{info['score_max']:.4f}]")
 
@@ -280,6 +390,7 @@ def main():
             max_points=args.max_points,
             pca_fit_points=args.pca_fit_points,
             seed=args.seed,
+            ply_format=args.ply_format,
         )
         evr = info["explained_variance_ratio"]
         print(f"[pca ply] {out_path}  points={info['num_points']}  EVR={evr}")

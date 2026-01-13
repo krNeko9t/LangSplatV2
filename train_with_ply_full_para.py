@@ -29,8 +29,9 @@ ITERATIONS = 10000
 LEVELS = [1, 2, 3]  # 所有需要跑的 level
 
 # 显卡设置
-NUM_GPUS = 8
+NUM_GPUS = 4
 GPU_IDS = list(range(NUM_GPUS))
+GPU_IDS = [1,2,3]
 
 # ================================================
 
@@ -70,7 +71,7 @@ def run_single_task(task_args):
         "--cos_loss",
         "--topk", str(TOPK),
         "--iterations", str(ITERATIONS),
-        "-r", "2"
+        # "-r", "2"
     ]
 
     try:

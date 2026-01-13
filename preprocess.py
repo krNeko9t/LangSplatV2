@@ -11,6 +11,7 @@ import torch
 from tqdm import tqdm
 from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
 import cv2
+import contextlib
 
 from dataclasses import dataclass, field
 from typing import Tuple, Type
@@ -414,12 +415,17 @@ def sam_encoder(image):
         print(f"[警告] SAM模型不在GPU上！device: {sam_device}")
     
     profiler.start("SAM_mask_generation")
-    # SAM的generate方法内部会处理图像，但输入是numpy数组
-    # 这会导致CPU→GPU传输开销
-    # print('autocast')
-    # with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-    # masks = mask_generator.generate(image)
-    with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False):
+    # SDP kernel：尽量不要强制只开flash（有些shape/驱动组合反而更慢或fallback）
+    if args.sam_sdp == "auto":
+        sdp_ctx = contextlib.nullcontext()
+    elif args.sam_sdp == "flash":
+        sdp_ctx = torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False)
+    elif args.sam_sdp == "mem_efficient":
+        sdp_ctx = torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=False, enable_mem_efficient=True)
+    else:  # math
+        sdp_ctx = torch.backends.cuda.sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=False)
+
+    with sdp_ctx:
         masks_default, masks_s, masks_m, masks_l = mask_generator.generate(image)
     profiler.end()
     
@@ -491,22 +497,39 @@ if __name__ == '__main__':
     parser.add_argument('--resolution', type=int, default=-1)
     parser.add_argument('--sam_ckpt_path', type=str, default="ckpts/sam_vit_h_4b8939.pth")
     # SAM性能优化参数
-    parser.add_argument('--sam_points_per_side', type=int, default=16, 
+    parser.add_argument('--sam_points_per_side', type=int, default=32, 
                         help='SAM采样点密度，降低可提升速度但减少mask数量 (默认: 32)')
+    parser.add_argument('--sam_points_per_batch', type=int, default=64,
+                        help='SAM每次前向同时处理的点数，增大通常更快但更占显存 (默认: 64)')
     parser.add_argument('--sam_pred_iou_thresh', type=float, default=0.7,
                         help='SAM预测IoU阈值，提高可减少mask数量 (默认: 0.7)')
     parser.add_argument('--sam_stability_score_thresh', type=float, default=0.85,
                         help='SAM稳定性分数阈值，提高可减少mask数量 (默认: 0.85)')
-    parser.add_argument('--sam_crop_n_layers', type=int, default=0,
+    parser.add_argument('--sam_crop_n_layers', type=int, default=1,
                         help='SAM多尺度裁剪层数，设为0可禁用多尺度 (默认: 1)')
+    parser.add_argument('--sam_autocast', type=str, default="off",
+                        choices=["off", "fp16", "bf16"],
+                        help='仅对SAM前向启用autocast；后处理强制float32以避免报错 (默认: off)')
+    parser.add_argument('--sam_sdp', type=str, default="auto",
+                        choices=["auto", "flash", "mem_efficient", "math"],
+                        help='SDP kernel选择：auto=不强制；其余为强制指定 (默认: auto)')
+    parser.add_argument('--max_images', type=int, default=-1,
+                        help='仅处理前N张图用于测速/调参，-1为全部 (默认: -1)')
     args = parser.parse_args()
     torch.set_default_dtype(torch.float32)
+
+    # 轻量加速：TF32（对SAM/CLIP一般稳定；若需严格可复现可关掉）
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     dataset_path = args.dataset_path
     sam_ckpt_path = args.sam_ckpt_path
     img_folder = os.path.join(dataset_path, 'images')
     data_list = os.listdir(img_folder)
     data_list.sort()
+    if args.max_images is not None and args.max_images > 0:
+        data_list = data_list[: args.max_images]
 
     model = OpenCLIPNetwork(OpenCLIPNetworkConfig)
     sam = sam_model_registry["vit_h"](checkpoint=sam_ckpt_path).to('cuda')
@@ -516,14 +539,16 @@ if __name__ == '__main__':
     
     # 使用命令行参数配置SAM，允许性能优化
     print(f"[SAM配置] points_per_side={args.sam_points_per_side}, "
+          f"points_per_batch={args.sam_points_per_batch}, "
           f"pred_iou_thresh={args.sam_pred_iou_thresh}, "
           f"stability_score_thresh={args.sam_stability_score_thresh}, "
-          f"crop_n_layers={args.sam_crop_n_layers}")
+          f"crop_n_layers={args.sam_crop_n_layers}, "
+          f"autocast={args.sam_autocast}, sdp={args.sam_sdp}")
     
     mask_generator = SamAutomaticMaskGenerator(
         model=sam,
         points_per_side=args.sam_points_per_side,
-        points_per_batch = 64,
+        points_per_batch=args.sam_points_per_batch,
         pred_iou_thresh=args.sam_pred_iou_thresh,
         box_nms_thresh=0.7,
         stability_score_thresh=args.sam_stability_score_thresh,
@@ -531,6 +556,14 @@ if __name__ == '__main__':
         crop_n_points_downscale_factor=1,
         min_mask_region_area=100,
     )
+
+    # 将autocast配置传递给SAM predictor（仅影响前向；后处理在AMG内部会强制float32）
+    if args.sam_autocast == "fp16":
+        mask_generator.predictor.autocast_dtype = torch.float16
+    elif args.sam_autocast == "bf16":
+        mask_generator.predictor.autocast_dtype = torch.bfloat16
+    else:
+        mask_generator.predictor.autocast_dtype = None
 
     img_list = []
     WARNED = False
