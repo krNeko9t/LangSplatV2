@@ -1,8 +1,5 @@
 import os
 os.environ['HF_HUB_OFFLINE'] = '1'
-
-# 2. 告诉程序去哪里找已下载的模型
-# 指向那个包含 'models--laion--...' 文件夹的父目录
 os.environ['HF_HUB_CACHE'] = '/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/huggingface_cache'
 import random
 import argparse

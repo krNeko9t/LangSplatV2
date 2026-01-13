@@ -1,4 +1,5 @@
-DATASET_ROOT_PATH=./scannetpp
+# DATASET_ROOT_PATH=./scannetpp
+DATASET_ROOT_PATH=/mnt/shared-storage-gpfs2/solution-gpfs02/liuyifei/scannet_fuse
 DATASET_NAME=0a7cc12c0e
 # DATASET_ROOT_PATH=./lerf_ovs
 # DATASET_NAME=teatime

@@ -19,6 +19,8 @@ import sklearn
 import numpy as np
 import torch
 import os
+os.environ['HF_HUB_OFFLINE'] = '1'
+os.environ['HF_HUB_CACHE'] = '/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/huggingface_cache'
 import random
 from tqdm import tqdm
 import time
