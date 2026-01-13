@@ -11,6 +11,7 @@
 
 import torch
 import numpy as np
+import re
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
 from torch import nn
 import os
@@ -296,7 +297,7 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
-    def load_ply(self, path):
+    def load_ply(self, path, scale_mode: str = "log", quat_order: str = "wxyz"):
         plydata = PlyData.read(path)
 
         xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
@@ -318,17 +319,56 @@ class GaussianModel:
         # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
         features_extra = features_extra.reshape((features_extra.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
 
-        scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
-        scale_names = sorted(scale_names, key = lambda x: int(x.split('_')[-1]))
+        # Be tolerant to common naming variants: scale_0..2 or scale0..2
+        prop_names = [p.name for p in plydata.elements[0].properties]
+        scale_names = [n for n in prop_names if re.fullmatch(r"scale_?\d+", n)]
+        scale_names = sorted(scale_names, key=lambda x: int(re.findall(r"\d+", x)[-1]))
         scales = np.zeros((xyz.shape[0], len(scale_names)))
         for idx, attr_name in enumerate(scale_names):
             scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
-        rot_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("rot")]
-        rot_names = sorted(rot_names, key = lambda x: int(x.split('_')[-1]))
-        rots = np.zeros((xyz.shape[0], len(rot_names)))
+        # NOTE:
+        # - This codebase stores internal scaling as log-scales (activated via exp in `get_scaling`).
+        # - Some external 3DGS exporters store linear scales in PLY. If we load linear scales as log,
+        #   exp() will explode and gaussians can look "needle-like"/stretched along one direction.
+        # - To avoid affecting in-repo PLYs, scale conversion is controlled by `scale_mode`:
+        #   - "log": assume input is already log-scales (default; backward compatible)
+        #   - "linear": assume input is linear scales -> convert to log
+        #   - "auto": heuristic detect and convert when likely linear
+        # - Also be strict about quaternion fields: accept only rot_0..rot_3 to avoid accidentally
+        #   picking up unrelated properties starting with "rot".
+        if len(scale_names) != 3:
+            raise ValueError(f"Expected 3 scale_* properties, got {len(scale_names)}: {scale_names}")
+
+        if scale_mode not in {"log", "linear", "auto"}:
+            raise ValueError(f"Invalid scale_mode={scale_mode}. Expected one of: log, linear, auto.")
+
+        if scale_mode in {"linear", "auto"}:
+            finite_scales = scales[np.isfinite(scales)]
+            median_scale = float(np.median(finite_scales)) if finite_scales.size > 0 else float("nan")
+            should_convert = (scale_mode == "linear") or (np.isfinite(median_scale) and median_scale > 0.0)
+            if should_convert:
+                scales = np.log(np.clip(scales, 1e-12, None))
+                if scale_mode == "linear":
+                    print("[load_ply] scale_mode=linear: converted linear scales to log-scales.")
+                else:
+                    print(f"[load_ply] scale_mode=auto: detected likely linear scales (median={median_scale:.4g}); converted to log-scales.")
+
+        rot_names = [n for n in prop_names if re.fullmatch(r"rot_?\d+", n)]
+        rot_names = sorted(rot_names, key=lambda x: int(re.findall(r"\d+", x)[-1]))
+        if len(rot_names) != 4:
+            raise ValueError(f"Expected 4 rot_* properties (rot_0..rot_3), got {len(rot_names)}: {rot_names}")
+        rots = np.zeros((xyz.shape[0], 4))
         for idx, attr_name in enumerate(rot_names):
             rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
+
+        # Quaternion order compatibility:
+        # - This codebase expects (w, x, y, z) a.k.a. "wxyz"
+        # - Some exporters store (x, y, z, w) a.k.a. "xyzw"
+        if quat_order not in {"wxyz", "xyzw"}:
+            raise ValueError(f"Invalid quat_order={quat_order}. Expected one of: wxyz, xyzw.")
+        if quat_order == "xyzw":
+            rots = rots[:, [3, 0, 1, 2]]
 
         self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
         print(self._xyz.shape[0])
