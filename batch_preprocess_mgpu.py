@@ -11,19 +11,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 DATA_ROOT = Path("/mnt/shared-storage-gpfs2/solution-gpfs02/liuyifei/scannet_fuse")
 
 SCENE_LIST = [
-    "027cd6ea0f",
-    "09d6e808b4",
+    # "027cd6ea0f",
+    # "09d6e808b4",
     "0a7cc12c0e",
-    "0b031f3119",
-    "0d8ead0038",
-    "116456116b",
-    "17a5e7d36c",
-    "1cefb55d50",
-    "20871b98f3"
+    # "0b031f3119",
+    # "0d8ead0038",
+    # "116456116b",
+    # "17a5e7d36c",
+    # "1cefb55d50",
+    # "20871b98f3"
 ]
 
 # 设置可用的 GPU 数量 (这里设为 8)
-NUM_GPUS = 8
+NUM_GPUS = 4
 # 如果你想指定具体的卡号，比如只用后4张，可以改成: [4, 5, 6, 7]
 GPU_IDS = list(range(NUM_GPUS)) 
 

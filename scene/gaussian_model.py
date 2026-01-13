@@ -546,6 +546,136 @@ class GaussianModel:
             soft_code = softmax_to_topk_soft_code(logits[:, i*codebook_size:(i+1)*codebook_size], k)
             weights.append(soft_code)
         return torch.cat(weights, dim=-1).float()
+
+    @torch.no_grad()
+    def get_topk_weights_and_indices(self, k: int):
+        """
+        从每个Gaussian的logits里取每层top-k的(权重, 索引)。
+
+        - logits: [P, L*K]
+        - codebooks: [L, K, D]  (这里D通常是512)
+        返回:
+        - weights: [P, L, k]   (float32)
+        - indices: [P, L, k]   (int64, 每层内0..K-1)
+        """
+        if self._language_feature_logits is None or self._language_feature_codebooks is None:
+            raise ValueError("language feature logits/codebooks is None")
+        if k <= 0:
+            raise ValueError(f"k must be positive, got {k}")
+
+        logits = self._language_feature_logits
+        layer_num, codebook_size, _ = self._language_feature_codebooks.shape
+        P = logits.shape[0]
+
+        weights_out = []
+        indices_out = []
+        for l in range(layer_num):
+            layer_logits = logits[:, l * codebook_size:(l + 1) * codebook_size]  # [P, K]
+            probs = layer_logits.softmax(dim=1)
+            w, idx = torch.topk(probs, k, dim=1)  # [P, k], [P, k]
+            w = w / (w.sum(dim=1, keepdim=True) + 1e-10)
+            weights_out.append(w)
+            indices_out.append(idx.to(torch.int64))
+
+        weights = torch.stack(weights_out, dim=1).to(torch.float32)  # [P, L, k]
+        indices = torch.stack(indices_out, dim=1)  # [P, L, k]
+        assert weights.shape[:2] == (P, layer_num)
+        return weights, indices
+
+    def compute_per_gaussian_language_features(self, k: int = 4, accumulate_levels: bool = True, normalize: bool = True):
+        """
+        计算每个Gaussian自己的语言feature向量（per-GS feature）。
+
+        关键点:
+        - 这一步完全在GS维度上完成：feature_i = Σ_l Σ_j w_{i,l,j} * C_{l, idx_{i,l,j}}
+        - 如果你未来想“每个GS有自己的codebook”，这一步就是你要的“per-GS feature”定义；
+          只不过当前实现里 C 仍然是全局共享的（每层一个codebook）。
+
+        参数:
+        - k: 每层top-k（稀疏系数个数）
+        - accumulate_levels: True则按层累加（类似 residual VQ 的累加），返回 [P, D]
+                             False则返回每层feature，形状 [P, L, D]
+        - normalize: 是否做L2归一化（推荐，便于与CLIP做cosine）
+        """
+        if self._language_feature_codebooks is None:
+            raise ValueError("language feature codebooks is None")
+        weights, indices = self.get_topk_weights_and_indices(k)  # [P, L, k], [P, L, k]
+        codebooks = self._language_feature_codebooks  # [L, K, D]
+
+        # gather每层topk codewords
+        # codebooks[l][indices[:,l,:]] -> [P, k, D]
+        feats_per_level = []
+        for l in range(codebooks.shape[0]):
+            C_l = codebooks[l]  # [K, D]
+            idx_l = indices[:, l, :]  # [P, k]
+            w_l = weights[:, l, :].unsqueeze(-1)  # [P, k, 1]
+            codewords = C_l[idx_l]  # [P, k, D]
+            feat_l = (w_l * codewords).sum(dim=1)  # [P, D]
+            feats_per_level.append(feat_l)
+
+        feats_per_level = torch.stack(feats_per_level, dim=1)  # [P, L, D]
+        if accumulate_levels:
+            feat = feats_per_level.sum(dim=1)  # [P, D]
+            if normalize:
+                feat = feat / (feat.norm(dim=1, keepdim=True) + 1e-10)
+            return feat
+        else:
+            if normalize:
+                feats_per_level = feats_per_level / (feats_per_level.norm(dim=2, keepdim=True) + 1e-10)
+            return feats_per_level
+
+    def compute_per_gaussian_language_features_from_topk(
+        self,
+        topk_weights: torch.Tensor,
+        topk_indices: torch.Tensor,
+        *,
+        normalize: bool = True,
+    ) -> torch.Tensor:
+        """
+        从“已算好的top-k (weights, indices)”直接计算 per-GS 的语言feature。
+
+        适用场景：
+        - 推理/可视化阶段你可能只保留了 top-k 权重与索引（比如 `quick_render` 用的那套），
+          不想/不能再访问 logits。
+
+        约定：
+        - self._language_feature_codebooks: [L, K, D]
+        - topk_weights: [P, L*k] 或 [P, k*L]
+        - topk_indices: [P, L*k]，索引可以是：
+            - “扁平索引” 0..(L*K-1)（推荐，当前 `visualize_lerf.py` 就是这么做的：level_offset + local_idx）
+            - 或者 “层内索引” 0..(K-1)（此时你需要自己保证每层不混）
+
+        返回：
+        - per_gs_feat: [P, D]
+        """
+        if self._language_feature_codebooks is None:
+            raise ValueError("language feature codebooks is None")
+        if topk_weights.ndim != 2 or topk_indices.ndim != 2:
+            raise ValueError(f"Expected 2D tensors, got weights={topk_weights.shape}, indices={topk_indices.shape}")
+        if topk_weights.shape != topk_indices.shape:
+            raise ValueError(f"weights/indices shape mismatch: {topk_weights.shape} vs {topk_indices.shape}")
+
+        codebooks = self._language_feature_codebooks  # [L, K, D]
+        L, K, D = codebooks.shape
+        codebook_flat = codebooks.reshape(L * K, D)  # [L*K, D]
+
+        # indices 可能是 float（历史代码里有 float），这里统一转 long；若是浮点则四舍五入
+        if not torch.is_floating_point(topk_indices):
+            idx = topk_indices.to(torch.int64)
+        else:
+            idx = torch.round(topk_indices).to(torch.int64)
+
+        # 安全裁剪，避免越界（不改变排序语义）
+        idx = idx.clamp(min=0, max=L * K - 1)
+
+        # gather codewords: [P, LK, D]
+        codewords = codebook_flat[idx]  # [P, LK, D]
+        w = topk_weights.to(codewords.dtype).unsqueeze(-1)  # [P, LK, 1]
+        feat = (w * codewords).sum(dim=1)  # [P, D]
+
+        if normalize:
+            feat = feat / (feat.norm(dim=1, keepdim=True) + 1e-10)
+        return feat
     
     def compute_feature_maps(self, language_feature_weight_map):
         D, H, W = language_feature_weight_map.shape
