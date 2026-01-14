@@ -22,6 +22,10 @@ SCENE_LIST = [
     # "20871b98f3"
 ]
 
+SCENE_LIST = [
+    "0a7cc12c0e_down",
+]
+
 # 训练参数
 INDEX = 0
 TOPK = 4
@@ -71,6 +75,8 @@ def run_single_task(task_args):
         "--cos_loss",
         "--topk", str(TOPK),
         "--iterations", str(ITERATIONS),
+        "--train_subset_first_n", "1",
+        "--resolution", "512",
         # "-r", "2"
     ]
 
@@ -84,7 +90,7 @@ def run_single_task(task_args):
     try:
         # 检查 ply
         if not start_ply_path.exists():
-            print(f"[GPU {gpu_id}] [跳过] {task_id} 找不到 ply 文件")
+            print(f"[GPU {gpu_id}] [跳过] {task_id} 找不到 ply 文件：{start_ply_path}")
             return
 
         subprocess.run(cmd, check=True, env=env)

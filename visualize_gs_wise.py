@@ -151,6 +151,81 @@ def _write_gaussian_rgb_ply(
     PlyData([PlyElement.describe(elements, "vertex")], text=text).write(str(out_path))
 
 
+def _write_gaussian_ply_with_extra(
+    gaussians: GaussianModel,
+    extra_f4: dict,
+    out_path: Path,
+    *,
+    text: bool = False,
+):
+    """
+    写“正常3DGS / Supersplat”兼容的 PLY（保留checkpoint原始SH颜色/外观），
+    并在 vertex 属性末尾追加自定义 extra 字段（通常会被渲染器忽略，但便于后处理）。
+
+    extra_f4:
+      - key: 属性名（建议以 extra_ 前缀避免冲突）
+      - value: np.ndarray，shape 为 [P] 或 [P,1] 或 [P,C]，dtype 可转换为 float32
+    """
+    xyz = gaussians._xyz.detach().cpu().numpy().astype(np.float32)
+    P = int(xyz.shape[0])
+    normals = np.zeros_like(xyz, dtype=np.float32)
+
+    f_dc = (
+        gaussians._features_dc.detach()
+        .transpose(1, 2)
+        .flatten(start_dim=1)
+        .contiguous()
+        .cpu()
+        .numpy()
+        .astype(np.float32)
+    )
+    f_rest = (
+        gaussians._features_rest.detach()
+        .transpose(1, 2)
+        .flatten(start_dim=1)
+        .contiguous()
+        .cpu()
+        .numpy()
+        .astype(np.float32)
+    )
+    opacities = gaussians._opacity.detach().cpu().numpy().astype(np.float32)
+    scale = gaussians._scaling.detach().cpu().numpy().astype(np.float32)
+    rotation = gaussians._rotation.detach().cpu().numpy().astype(np.float32)
+
+    attributes_base = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+    dtype_base = [(attribute, "f4") for attribute in gaussians.construct_list_of_attributes()]
+
+    extra_names = sorted(list(extra_f4.keys()))
+    extra_cols = []
+    dtype_extra = []
+    for name in extra_names:
+        v = extra_f4[name]
+        v = np.asarray(v)
+        if v.ndim == 1:
+            v = v.reshape(-1, 1)
+        if v.shape[0] != P:
+            raise ValueError(f"extra[{name}] P mismatch: {v.shape[0]} vs {P}")
+        v = v.astype(np.float32)
+        extra_cols.append(v)
+        for c in range(int(v.shape[1])):
+            # 当用户传入 [P,C] 且 C>1 时，按 name_0/name_1... 展开
+            prop_name = name if v.shape[1] == 1 else f"{name}_{c}"
+            dtype_extra.append((prop_name, "f4"))
+
+    dtype_full = dtype_base + dtype_extra
+    elements = np.empty(P, dtype=dtype_full)
+
+    if len(extra_cols) > 0:
+        extras_concat = np.concatenate(extra_cols, axis=1)
+        attributes_full = np.concatenate((attributes_base, extras_concat), axis=1)
+    else:
+        attributes_full = attributes_base
+
+    elements[:] = list(map(tuple, attributes_full))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    PlyData([PlyElement.describe(elements, "vertex")], text=text).write(str(out_path))
+
+
 def build_combined_gaussians_from_3levels(args) -> GaussianModel:
     """
     构建一个“组合gaussians”：
@@ -246,6 +321,19 @@ def export_query_relevance_ply(
         sel_np = sel_t.detach().cpu().numpy() if sel_t is not None else None
         g = _slice_gaussians_cpu(combined, sel_np)
         _write_gaussian_rgb_ply(g, colors01, out_path, text=False)
+    elif ply_format == "gaussian_extra":
+        sel_np = sel_t.detach().cpu().numpy() if sel_t is not None else None
+        g = _slice_gaussians_cpu(combined, sel_np)
+        score_raw = scores.detach().cpu().numpy().astype(np.float32)
+        score_01 = scores01.detach().cpu().numpy().astype(np.float32)
+        extra = {
+            "extra_query_r": colors01[:, 0].astype(np.float32),
+            "extra_query_g": colors01[:, 1].astype(np.float32),
+            "extra_query_b": colors01[:, 2].astype(np.float32),
+            "extra_query_score": score_raw,
+            "extra_query_score01": score_01,
+        }
+        _write_gaussian_ply_with_extra(g, extra, out_path, text=False)
     else:
         raise ValueError(f"Unknown ply_format={ply_format}")
     num_points = int(scores.shape[0])
@@ -299,6 +387,14 @@ def export_pca_embedding_ply(
     elif ply_format == "gaussian":
         g = _slice_gaussians_cpu(combined, sel)
         _write_gaussian_rgb_ply(g, rgb01, out_path, text=False)
+    elif ply_format == "gaussian_extra":
+        g = _slice_gaussians_cpu(combined, sel)
+        extra = {
+            "extra_pca_r": rgb01[:, 0].astype(np.float32),
+            "extra_pca_g": rgb01[:, 1].astype(np.float32),
+            "extra_pca_b": rgb01[:, 2].astype(np.float32),
+        }
+        _write_gaussian_ply_with_extra(g, extra, out_path, text=False)
     else:
         raise ValueError(f"Unknown ply_format={ply_format}")
     return {
@@ -328,8 +424,13 @@ def main():
         "--ply_format",
         type=str,
         default="gaussian",
-        choices=["gaussian", "pointcloud"],
-        help="导出PLY格式：gaussian=3DGS/Supersplat兼容（含f_dc/scale/rot/opacity等），pointcloud=仅xyz+rgb",
+        choices=["gaussian", "gaussian_extra", "pointcloud"],
+        help=(
+            "导出PLY格式："
+            "gaussian=3DGS/Supersplat兼容（用可视化色覆盖f_dc，颜色不随视角变化）；"
+            "gaussian_extra=保留checkpoint原始3DGS外观，并把可视化结果写到 extra_* 额外属性；"
+            "pointcloud=仅xyz+rgb"
+        ),
     )
 
     parser.add_argument("--max_points", type=int, default=50000, help="导出PLY最多点数（query为topN，pca为随机采样）")

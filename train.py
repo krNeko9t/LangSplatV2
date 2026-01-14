@@ -12,7 +12,7 @@
 import os
 import torch
 import torch.nn as nn
-from random import randint
+from random import randint, Random
 from utils.loss_utils import l1_loss, ssim, cos_loss
 from gaussian_renderer import render, network_gui
 import sys
@@ -35,6 +35,41 @@ import matplotlib.pyplot as plt
 # 每个元素的绝对值表示使用的轴（1=x,2=y,3=z），符号表示是否翻转
 START_PLY_TRANSFORM = [2, 1, -3]
 START_PLY_TRANSFORM = [2,1,-3]
+
+def select_train_cameras(scene: Scene, args):
+    """
+    选择用于训练的相机子集，用于过拟合/调试。
+    - 优先使用 --train_subset_first_n（>0）
+    - 否则若 --train_subset_ratio < 1.0，则随机抽取固定比例（可用 --train_subset_seed 复现）
+    - 否则返回全部训练相机
+    """
+    train_cams_all = scene.getTrainCameras().copy()
+    n_all = len(train_cams_all)
+    if n_all == 0:
+        return train_cams_all
+
+    first_n = getattr(args, "train_subset_first_n", -1)
+    ratio = getattr(args, "train_subset_ratio", 1.0)
+    seed = getattr(args, "train_subset_seed", 0)
+
+    if first_n is not None and int(first_n) > 0:
+        n = min(int(first_n), n_all)
+        subset = train_cams_all[:n]
+        print(f"[TrainSubset] using first {n}/{n_all} train cameras")
+        return subset
+
+    if ratio is not None and float(ratio) < 1.0:
+        r = max(0.0, float(ratio))
+        k = int(n_all * r)
+        k = max(1, min(k, n_all))
+        rng = Random(int(seed))
+        idxs = rng.sample(range(n_all), k=k)
+        subset = [train_cams_all[i] for i in idxs]
+        print(f"[TrainSubset] using random {k}/{n_all} train cameras (ratio={r}, seed={seed})")
+        return subset
+
+    print(f"[TrainSubset] using all {n_all} train cameras")
+    return train_cams_all
 
 def apply_start_ply_transform(gaussians):
     transform = START_PLY_TRANSFORM
@@ -106,6 +141,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
+    train_cameras = select_train_cameras(scene, args)
     start_from_ply = False
 
     if start_ply and not checkpoint:
@@ -185,7 +221,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # Pick a random Camera
         if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
+            viewpoint_stack = train_cameras.copy()
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
         
         # Render
@@ -363,6 +399,24 @@ if __name__ == "__main__":
     parser.add_argument('--normalize', action='store_true', default=False)
     parser.add_argument('--accum_iter', type=int, default=1)
     parser.add_argument('--topk', type=int, default=1)
+    parser.add_argument(
+        "--train_subset_ratio",
+        type=float,
+        default=1.0,
+        help="训练时仅使用训练视角的一个比例子集（<1.0 时生效，如 0.1 表示随机抽取10%）。默认 1.0 表示全部。"
+    )
+    parser.add_argument(
+        "--train_subset_first_n",
+        type=int,
+        default=-1,
+        help="训练时仅使用训练集前 N 个视角（>0 时生效，优先级高于 --train_subset_ratio）。例如 10 表示只用前10个视角。"
+    )
+    parser.add_argument(
+        "--train_subset_seed",
+        type=int,
+        default=0,
+        help="当使用 --train_subset_ratio 随机抽样时的随机种子（保证可复现）。"
+    )
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     print(args)
