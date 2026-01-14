@@ -13,10 +13,10 @@ DATA_ROOT = Path("/mnt/shared-storage-gpfs2/solution-gpfs02/liuyifei/scannet_fus
 SCENE_LIST = [
     # "027cd6ea0f",
     # "09d6e808b4",
-    "0a7cc12c0e",
-    # "0b031f3119",
+    # "0a7cc12c0e",
+    "0b031f3119",
     # "0d8ead0038",
-    # "116456116b",
+    "116456116b",
     # "17a5e7d36c",
     # "1cefb55d50",
     # "20871b98f3"
@@ -25,13 +25,13 @@ SCENE_LIST = [
 # 训练参数
 INDEX = 0
 TOPK = 4
-ITERATIONS = 10000
+ITERATIONS = 30000
 LEVELS = [1, 2, 3]  # 所有需要跑的 level
 
 # 显卡设置
 NUM_GPUS = 4
 GPU_IDS = list(range(NUM_GPUS))
-GPU_IDS = [1,2,3]
+# GPU_IDS = [2,3,4,5]
 
 # ================================================
 
@@ -73,6 +73,13 @@ def run_single_task(task_args):
         "--iterations", str(ITERATIONS),
         # "-r", "2"
     ]
+
+    start_checkpoint_path = Path(f"output_pgsr/{scene_name}_{INDEX}_{level}") / "chkpnt10000.pth"
+    print(f"[GPU {gpu_id}] [检查点文件] {start_checkpoint_path}")
+    if start_checkpoint_path.exists():
+        print(f"[GPU {gpu_id}] [使用] {task_id} 检查点文件")
+        cmd.append("--start_checkpoint")
+        cmd.append(str(start_checkpoint_path))
 
     try:
         # 检查 ply
