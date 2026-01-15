@@ -70,6 +70,38 @@ def select_train_cameras(scene: Scene, args):
     print(f"[TrainSubset] using all {n_all} train cameras")
     return train_cams_all
 
+def parse_subset_schedule(schedule_str: str):
+    """
+    Parse schedule string like: "0:0.1,5000:0.2,10000:0.5,20000:1.0"
+    Returns sorted list of (start_iter, ratio).
+    """
+    if not schedule_str:
+        return None
+    items = []
+    for part in schedule_str.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            raise ValueError(f"Invalid schedule item '{part}', expected 'iter:ratio'")
+        it_s, ratio_s = part.split(":", 1)
+        it = int(it_s)
+        ratio = float(ratio_s)
+        items.append((it, ratio))
+    items.sort(key=lambda x: x[0])
+    return items
+
+def get_ratio_for_iter(schedule, iteration: int, default_ratio: float):
+    if not schedule:
+        return default_ratio
+    ratio = default_ratio
+    for it, r in schedule:
+        if iteration >= it:
+            ratio = r
+        else:
+            break
+    return ratio
+
 def apply_start_ply_transform(gaussians):
     transform = START_PLY_TRANSFORM
     if not transform :
@@ -140,6 +172,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
+    schedule = parse_subset_schedule(getattr(args, "train_subset_schedule", None))
+    schedule_ratio = get_ratio_for_iter(schedule, 0, getattr(args, "train_subset_ratio", 1.0))
+    args.train_subset_ratio = schedule_ratio
     train_cameras = select_train_cameras(scene, args)
     start_from_ply = False
 
@@ -194,10 +229,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     loss_record = []
     iter_record = []
     smooth_loss = None
+    last_schedule_ratio = schedule_ratio
     for iteration in range(first_iter, opt.iterations + 1):        
         iter_start.record()
 
         gaussians.update_learning_rate(iteration)
+
+        if schedule:
+            schedule_ratio = get_ratio_for_iter(schedule, iteration, args.train_subset_ratio)
+            if schedule_ratio != last_schedule_ratio:
+                args.train_subset_ratio = schedule_ratio
+                train_cameras = select_train_cameras(scene, args)
+                viewpoint_stack = None
+                last_schedule_ratio = schedule_ratio
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
@@ -400,6 +444,12 @@ if __name__ == "__main__":
         type=int,
         default=0,
         help="当使用 --train_subset_ratio 随机抽样时的随机种子（保证可复现）。"
+    )
+    parser.add_argument(
+        "--train_subset_schedule",
+        type=str,
+        default=None,
+        help="训练视角比例的阶段调度，格式: '0:0.1,5000:0.2,10000:0.5,20000:1.0'。"
     )
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)

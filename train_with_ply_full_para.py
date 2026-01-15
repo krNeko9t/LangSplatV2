@@ -16,14 +16,14 @@ SCENE_LIST = [
     # "0a7cc12c0e",
     "0b031f3119",
     # "0d8ead0038",
-    "116456116b",
+    # "116456116b",
     # "17a5e7d36c",
     # "1cefb55d50",
     # "20871b98f3"
 ]
 
 SCENE_LIST = [
-    "0a7cc12c0e_down",
+    "0a7cc12c0e",
 ]
 
 # 训练参数
@@ -33,9 +33,9 @@ ITERATIONS = 30000
 LEVELS = [1, 2, 3]  # 所有需要跑的 level
 
 # 显卡设置
-NUM_GPUS = 4
+NUM_GPUS = 3
 GPU_IDS = list(range(NUM_GPUS))
-# GPU_IDS = [2,3,4,5]
+GPU_IDS = [3,4,5]
 
 # ================================================
 
@@ -55,7 +55,7 @@ def run_single_task(task_args):
     # 注意：如果多个 Level 同时往同一个文件夹写 checkpoint/log，可能会有冲突。
     # 如果你的代码内部没有处理子文件夹，建议在这里把 output_dir 区分开，比如加后缀
     # output_model_dir = Path(f"output_pgsr/{scene_name}_{INDEX}_L{level}") 
-    output_model_dir = Path(f"output_pgsr/{scene_name}_{INDEX}")
+    output_model_dir = Path(f"output_pgsr_optimized/{scene_name}_{INDEX}")
 
     # 设置环境变量
     env = os.environ.copy()
@@ -75,12 +75,16 @@ def run_single_task(task_args):
         "--cos_loss",
         "--topk", str(TOPK),
         "--iterations", str(ITERATIONS),
-        "--train_subset_first_n", "1",
-        "--resolution", "512",
+        # "--train_subset_first_n", "1",
+        # "--resolution", "512",
+        "--train_subset_schedule", "0:0.1,5000:0.2,10000:0.5,20000:1.0",
+        "--language_feature_lr", "0.0005",
+        "--accum_iter", "4",
+        "--topk", "8",
         # "-r", "2"
     ]
 
-    start_checkpoint_path = Path(f"output_pgsr/{scene_name}_{INDEX}_{level}") / "chkpnt10000.pth"
+    start_checkpoint_path = Path(f"output_pgsr_optimized/{scene_name}_{INDEX}_{level}") / "chkpnt10000.pth"
     print(f"[GPU {gpu_id}] [检查点文件] {start_checkpoint_path}")
     if start_checkpoint_path.exists():
         print(f"[GPU {gpu_id}] [使用] {task_id} 检查点文件")
