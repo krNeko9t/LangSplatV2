@@ -18,6 +18,10 @@ SCENE_LIST=(
     "20871b98f3"
 )
 
+SCENE_LIST=(
+    "924b364b9f"
+)
+
 # 3. 循环处理每一个场景
 for SCENE_NAME in "${SCENE_LIST[@]}"; do
     echo "----------------------------------------"

@@ -3,8 +3,8 @@
 导出 LangSplatV2 的“最终产物”（不依赖渲染 weight-map）：
 
 1) PLY（每点）：
-   - x/y/z: float32
-   - weight_0..weight_63: float32   （来自每个 GS 的 language logits -> softmax；可选 top-k 稀疏化）
+   - 默认导出“3DGS / Supersplat 兼容”字段：x/y/z, nx/ny/nz, f_dc_*, f_rest_*, opacity, scale_*, rot_*
+   - 并追加 extra 属性：weight_0..weight_63: float32（来自每个 GS 的 language logits -> softmax；可选 top-k 稀疏化）
 
 2) Codebook：
    - 二进制 .bin（Float32Array），长度 64*512（row-major）
@@ -13,12 +13,13 @@
    - JSON: {"queries":[{"name":"elephant","vector":[...512 floats...]}]}
    - text embedding 使用 OpenCLIPNetwork（与仓库其它可视化脚本一致，默认归一化）
 
-参数风格对齐 .vscode/launch.json(156-165)：--scene_id, -s, --gt_json, --ckpt_root, --ckpt_prefix,
---checkpoint, --threshold, --topk, --output_dir, --save_visuals。
+本脚本只保留“导出真正需要”的参数；不再携带 eval/可视化相关的占位参数（如 gt_json/threshold 等）。
 """
 
 import json
 import os
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["HF_HUB_CACHE"] = "/mnt/shared-storage-gpfs2/solution-gpfs02/liaoyuanjun/huggingface_cache"
 from argparse import ArgumentParser
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -52,6 +53,124 @@ def _resolve_ckpt_dir(ckpt_root: str, ckpt_prefix: str, level: int) -> Path:
             f"找到多个候选 checkpoint 目录（请检查 --ckpt_prefix 是否更精确）：{[str(m) for m in matches[:10]]}"
         )
     raise FileNotFoundError(f"找不到 checkpoint 目录：{cand1} 或 {cand2}（root={root}）")
+
+
+def _infer_scene_id_from_ckpt_prefix(ckpt_prefix: str) -> str:
+    """
+    常见 ckpt_prefix 形如:
+      - <scene>_<index>      e.g. figurines_0, 0a7cc12c0e_0
+    此时 scene_id 默认取最后一个 '_' 之前的部分。
+    若不含 '_'，则直接返回 ckpt_prefix。
+    """
+    s = str(ckpt_prefix)
+    if "_" not in s:
+        return s
+    return s.rsplit("_", 1)[0]
+
+
+def _construct_3dgs_attribute_names(
+    features_dc: torch.Tensor,
+    features_rest: torch.Tensor,
+    scaling: torch.Tensor,
+    rotation: torch.Tensor,
+) -> List[str]:
+    """
+    复刻 scene/gaussian_model.py:GaussianModel.construct_list_of_attributes 的命名规则，
+    以保证导出的 PLY 与本仓库 3DGS PLY schema 兼容。
+    """
+    l = ["x", "y", "z", "nx", "ny", "nz"]
+    for i in range(int(features_dc.shape[1] * features_dc.shape[2])):
+        l.append(f"f_dc_{i}")
+    for i in range(int(features_rest.shape[1] * features_rest.shape[2])):
+        l.append(f"f_rest_{i}")
+    l.append("opacity")
+    for i in range(int(scaling.shape[1])):
+        l.append(f"scale_{i}")
+    for i in range(int(rotation.shape[1])):
+        l.append(f"rot_{i}")
+    return l
+
+
+def _write_gaussian_ply_with_extra_from_tensors(
+    *,
+    xyz: torch.Tensor,
+    features_dc: torch.Tensor,
+    features_rest: torch.Tensor,
+    opacity: torch.Tensor,
+    scaling: torch.Tensor,
+    rotation: torch.Tensor,
+    extra_f4: dict,
+    out_path: Path,
+    text: bool = False,
+):
+    """
+    导出“正常3DGS / Supersplat”兼容的 PLY（保留 checkpoint 原始外观参数），
+    并在 vertex 属性末尾追加自定义 extra 字段（float32）。
+
+    extra_f4:
+      - key: 属性名
+      - value: np.ndarray / torch.Tensor，shape 为 [P] / [P,1] / [P,C]
+    """
+    xyz_np = xyz.detach().cpu().numpy().astype(np.float32)
+    P = int(xyz_np.shape[0])
+    normals = np.zeros_like(xyz_np, dtype=np.float32)
+
+    f_dc = (
+        features_dc.detach()
+        .transpose(1, 2)
+        .flatten(start_dim=1)
+        .contiguous()
+        .cpu()
+        .numpy()
+        .astype(np.float32)
+    )
+    f_rest = (
+        features_rest.detach()
+        .transpose(1, 2)
+        .flatten(start_dim=1)
+        .contiguous()
+        .cpu()
+        .numpy()
+        .astype(np.float32)
+    )
+    opacities = opacity.detach().cpu().numpy().astype(np.float32)
+    scale = scaling.detach().cpu().numpy().astype(np.float32)
+    rot = rotation.detach().cpu().numpy().astype(np.float32)
+
+    attributes_base = np.concatenate((xyz_np, normals, f_dc, f_rest, opacities, scale, rot), axis=1)
+    names_base = _construct_3dgs_attribute_names(features_dc, features_rest, scaling, rotation)
+    dtype_base = [(name, "f4") for name in names_base]
+
+    extra_names = sorted(list(extra_f4.keys()))
+    extra_cols = []
+    dtype_extra = []
+    for name in extra_names:
+        v = extra_f4[name]
+        if isinstance(v, torch.Tensor):
+            v = v.detach().cpu().numpy()
+        v = np.asarray(v)
+        if v.ndim == 1:
+            v = v.reshape(-1, 1)
+        if v.shape[0] != P:
+            raise ValueError(f"extra[{name}] P mismatch: {v.shape[0]} vs {P}")
+        v = v.astype(np.float32)
+        extra_cols.append(v)
+        for c in range(int(v.shape[1])):
+            prop_name = name if v.shape[1] == 1 else f"{name}_{c}"
+            dtype_extra.append((prop_name, "f4"))
+
+    dtype_full = dtype_base + dtype_extra
+    elements = np.empty(P, dtype=dtype_full)
+
+    if len(extra_cols) > 0:
+        extras_concat = np.concatenate(extra_cols, axis=1)
+        attributes_full = np.concatenate((attributes_base, extras_concat), axis=1)
+    else:
+        attributes_full = attributes_base
+
+    elements[:] = list(map(tuple, attributes_full))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    PlyData([PlyElement.describe(elements, "vertex")], text=text).write(str(out_path))
 
 
 def _load_language_from_ckpt(ckpt_path: Path) -> Tuple[np.ndarray, torch.Tensor, torch.Tensor]:
@@ -119,24 +238,6 @@ def _compute_weights_64(
     return w.to(torch.float32)
 
 
-def _write_ply_xyz_weights64(xyz: np.ndarray, weights: np.ndarray, out_path: Path):
-    assert xyz.ndim == 2 and xyz.shape[1] == 3
-    assert weights.ndim == 2 and weights.shape[1] == 64
-    assert xyz.shape[0] == weights.shape[0]
-
-    dtype = [("x", "f4"), ("y", "f4"), ("z", "f4")]
-    dtype += [(f"weight_{i}", "f4") for i in range(64)]
-    verts = np.empty(xyz.shape[0], dtype=dtype)
-    verts["x"] = xyz[:, 0].astype(np.float32)
-    verts["y"] = xyz[:, 1].astype(np.float32)
-    verts["z"] = xyz[:, 2].astype(np.float32)
-    for i in range(64):
-        verts[f"weight_{i}"] = weights[:, i].astype(np.float32)
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    PlyData([PlyElement.describe(verts, "vertex")], text=False).write(str(out_path))
-
-
 def _write_codebook_bin(codebook_64x512: np.ndarray, out_path: Path):
     if codebook_64x512.shape != (64, 512):
         raise ValueError(f"codebook 必须是 [64,512]，实际 {codebook_64x512.shape}")
@@ -173,17 +274,18 @@ def main():
 
     parser = ArgumentParser(description="Export LangSplatV2 final products (PLY + codebook.bin + queries.json)")
 
-    # 对齐 launch.json(156-165)
-    parser.add_argument("--scene_id", type=str, required=True)
-    parser.add_argument("-s", "--source_path", type=str, default=None)
-    parser.add_argument("--gt_json", type=str, default=None)
+    # 输出路径相关
+    parser.add_argument(
+        "--scene_id",
+        type=str,
+        default=None,
+        help="输出子目录名；默认从 --ckpt_prefix 推断（如 figurines_0 -> figurines）",
+    )
     parser.add_argument("--ckpt_root", type=str, required=True)
     parser.add_argument("--ckpt_prefix", type=str, required=True)
     parser.add_argument("--checkpoint", type=int, required=True)
-    parser.add_argument("--threshold", type=float, default=None)
     parser.add_argument("--topk", type=int, default=4, help="导出 weights 时的 top-k 稀疏化（0/>=64 表示不稀疏）")
     parser.add_argument("--output_dir", type=str, required=True)
-    parser.add_argument("--save_visuals", action="store_true")
 
     # 额外：选择导出 level（每个 level 单独一套 64 权重 + 64x512 codebook）
     parser.add_argument("--feature_level", type=int, default=1, help="单个导出 level（默认 1）")
@@ -198,7 +300,8 @@ def main():
     levels = _parse_levels(args)
     device = torch.device(args.device if args.device is not None else ("cuda" if torch.cuda.is_available() else "cpu"))
 
-    out_root = Path(args.output_dir) / str(args.scene_id) / f"chkpnt{int(args.checkpoint)}"
+    scene_id = str(args.scene_id) if args.scene_id is not None else _infer_scene_id_from_ckpt_prefix(args.ckpt_prefix)
+    out_root = Path(args.output_dir) / scene_id / f"chkpnt{int(args.checkpoint)}"
     out_root.mkdir(parents=True, exist_ok=True)
 
     # queries.json（同一 scene/checkpoint 只写一次）
@@ -212,7 +315,25 @@ def main():
         if not ckpt_path.exists():
             raise FileNotFoundError(f"找不到 checkpoint 文件：{ckpt_path}")
 
-        xyz, logits, codebooks = _load_language_from_ckpt(ckpt_path)
+        ckpt = torch.load(str(ckpt_path), map_location="cpu")
+        if not (isinstance(ckpt, (tuple, list)) and len(ckpt) == 2):
+            raise ValueError(f"未知 checkpoint 格式：{type(ckpt)}")
+        model_params, _ = ckpt
+        if not (isinstance(model_params, (tuple, list)) and len(model_params) == 14):
+            raise ValueError(
+                f"checkpoint 里没有 language feature（期望 model_params 长度=14），实际 len={len(model_params) if isinstance(model_params,(tuple,list)) else 'N/A'}"
+            )
+
+        # capture(include_feature=True) 的顺序见 scene/gaussian_model.py:GaussianModel.capture
+        active_sh_degree = int(model_params[0])
+        xyz_t = torch.as_tensor(model_params[1]).detach().to(torch.float32)
+        f_dc_t = torch.as_tensor(model_params[2]).detach().to(torch.float32)
+        f_rest_t = torch.as_tensor(model_params[3]).detach().to(torch.float32)
+        scaling_t = torch.as_tensor(model_params[4]).detach().to(torch.float32)
+        rotation_t = torch.as_tensor(model_params[5]).detach().to(torch.float32)
+        opacity_t = torch.as_tensor(model_params[6]).detach().to(torch.float32)
+        logits = torch.as_tensor(model_params[7]).detach().to(torch.float32)
+        codebooks = torch.as_tensor(model_params[8]).detach().to(torch.float32)
 
         # codebooks: [L,K,512]，此导出格式要求 K=64 且 L=1
         L, K, D = codebooks.shape
@@ -223,19 +344,30 @@ def main():
                 f"当前 checkpoint 的 codebook 有 {L} 个 level；本导出格式要求单 level（64*512）。"
             )
 
-        weights = _compute_weights_64(logits, topk=int(args.topk), require_single_level=True).cpu().numpy()
+        weights64 = _compute_weights_64(logits, topk=int(args.topk), require_single_level=True).cpu().numpy()
         codebook = codebooks[0].cpu().numpy()
 
         lvl_dir = out_root / f"L{int(level)}"
-        ply_out = lvl_dir / "weights64.ply"
+        ply_out = lvl_dir / "gaussians_with_weights64.ply"
         bin_out = lvl_dir / "codebook_64x512.bin"
 
-        _write_ply_xyz_weights64(xyz, weights, ply_out)
+        extra = {f"weight_{i}": weights64[:, i] for i in range(64)}
+        _write_gaussian_ply_with_extra_from_tensors(
+            xyz=xyz_t,
+            features_dc=f_dc_t,
+            features_rest=f_rest_t,
+            opacity=opacity_t,
+            scaling=scaling_t,
+            rotation=rotation_t,
+            extra_f4=extra,
+            out_path=ply_out,
+            text=False,
+        )
         _write_codebook_bin(codebook, bin_out)
 
         print(f"[OK] level={level}")
         print(f"  ckpt: {ckpt_path}")
-        print(f"  ply:  {ply_out}   (P={xyz.shape[0]})")
+        print(f"  ply:  {ply_out}   (P={int(xyz_t.shape[0])}, sh_degree={active_sh_degree})")
         print(f"  bin:  {bin_out}   (len={64*512})")
 
     print(f"[DONE] outputs in: {out_root}")

@@ -77,9 +77,9 @@ def run_single_task(task_args):
         "--iterations", str(ITERATIONS),
         # "--train_subset_first_n", "1",
         # "--resolution", "512",
-        "--train_subset_schedule", "0:0.1,5000:0.2,10000:0.5,20000:1.0",
+        "--train_subset_schedule", "0:0.1,5000:0.2,10000:0.2,20000:0.5",
         "--language_feature_lr", "0.0005",
-        "--accum_iter", "4",
+        "--accum_iter", "8",
         "--topk", "8",
         # "-r", "2"
     ]
